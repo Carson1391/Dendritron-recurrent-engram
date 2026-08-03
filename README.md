@@ -1,749 +1,474 @@
-# Dendritron-ARM
+# Dendritron Recurrent Engram
 
 <p align="center">
   <a href="docs/Dendritron_ARM_Technical_Architecture_Brief.pdf">
-    <img src="docs/Dendritron_ARM_Technical_Architecture_Brief_Cover.png" alt="Dendritron-ARM Technical Architecture Brief cover" width="620">
+    <img src="docs/Dendritron_ARM_Technical_Architecture_Brief_Cover.png" alt="Dendritron Recurrent Engram architecture brief" width="620">
   </a>
 </p>
 
 <p align="center">
-  <strong><a href="docs/Dendritron_ARM_Technical_Architecture_Brief.pdf">Read the 19-page Technical Architecture Brief</a></strong><br>
-  Memory grafting · concept geometry · shared LoRA skills · expert-owned branches · DeepLoop · CPU/ARM
+  <strong><a href="docs/Dendritron_ARM_Technical_Architecture_Brief.pdf">Read the technical architecture brief</a></strong><br>
+  Two frozen phrase tables · layer-2 concept geometry · shared LoRA skills · expert-owned branches · two-block DeepLoop
 </p>
 
-> **Start here.** The illustrated brief explains the full intended architecture,
-> why each mechanism was selected, how the research papers support each section,
-> and the precise boundary between the runnable structural core and the remaining
-> semantic-branch implementation.
+## Why this architecture exists
 
-## Technical Architecture and Current Build Status
+Dendritron moves learned knowledge out of repeated dense computation and into
+sparse, addressable memory. A large Qwen donor performs the expensive semantic
+encoding once, offline. The live recipient then retrieves only the rows needed
+for the current text and carries its changing thought through two recurrent
+physical blocks on CPU/ARM.
 
-Architecture revision: 2026-08-03
+The design has one primary systems objective:
 
-> The original Dendritron notes supplied the architectural starting point and
-> the CPU/ARM objective. This repository records my technical interpretation,
-> extensions, implementation work, and the remaining engineering boundary.
+> **Use an NVIDIA-class GPU once to construct frozen knowledge assets; run and
+> train the live Dendritron through CPU/ARM memory lookup, low-rank skills,
+> sparse experts, and two reused blocks.**
 
-Dendritron-ARM is a CPU/ARM-first recurrent language architecture that separates
-stored knowledge from active reasoning. A large Qwen model produces frozen
-knowledge assets during offline preparation. The live recipient retrieves those
-assets sparsely, carries its changing thought through two repeatedly executed
-physical blocks, and applies universal directions, shared skills, and
-high-dimensional experts as distinct operation layers.
+The architecture separates stable knowledge from changing thought:
 
-The repository currently contains a runnable structural core and the offline
-asset pipelines. The full research model reaches its next meaningful milestone
-when typed reasoning branches, real memory assets, fitted joint-transfer maps,
-and corpus training are connected end to end.
+- **Memory is the stable reference.** Exact phrase states and definition-sense
+  locations preserve knowledge already learned by the donor.
+- **Compute is the changing region.** Skills, experts, branches, and recurrent
+  updates transform the current thought.
+- **The sparse-capacity law is fixed at 25% memory and 75% conditional
+  compute.** The ratio comes from the architecture's paired amplitudes `0.5`
+  and `sqrt(3)/2`, whose squared magnitudes are `0.25` and `0.75`, together
+  with the intended one-to-three relation between stable reference and active
+  transformation. Engram results provide external corroboration; they are not
+  the origin of the rule.
 
-This README is the current entry point. The versioned change files preserve
-development history, and [DENDRITRON_MASTER_SPEC.md](DENDRITRON_MASTER_SPEC.md)
-contains the longer design ledger.
+The DeepSeek Engram work motivates static lookup as a separate sparsity axis,
+and Memory Grafting shows that frozen donor hidden states can become the values
+inside an exact n-gram memory. Dendritron extends that idea with two donor
+depths, a definition-concept geometry, latent LNGram addressing, reusable LoRA
+skills, expert-owned reasoning branches, and a two-block recurrent engine.
 
-## Architectural Contract
+Research basis: [Conditional Memory via Scalable Lookup](https://arxiv.org/abs/2601.07372) and
+[Memory Grafting](https://arxiv.org/abs/2605.20948).
 
-- **Primary objective:** live training and inference on CPU/ARM. CUDA is confined
-  to one-time offline Qwen donor extraction.
-- **Live symbols:** the locked Qwen tokenizer supplies raw input and output IDs.
-  Dendritron owns the learned token-embedding and tied output table.
-- **State width:** the first production recipient uses a 2,048-dimensional live
-  state so the donor memories enter without a width bottleneck.
-- **Thought:** the evolving 2,048D activation passes through two stored physical
-  blocks for \(R\) rounds. Stored depth is 2; effective depth is \(2R\).
-- **Memory:** frozen bigram, trigram, and definition-sense banks provide explicit
-  knowledge. Hash Engram and LNGram provide trainable conditional memory.
-- **Geometry:** context contraction, memory locality, and vocabulary ranking use
-  ordinary Euclidean distance. HarMax supplies signed attraction and repulsion.
-- **Operation hierarchy:** 16-32 universal LoRA directions form the common
-  foundation; learnable shared skill adapters extend it; high-dimensional
-  experts specialize outside the low-rank basis.
-- **Capacity law:** scalable conditional capacity is fixed at 25% memory and 75%
-  conditional compute.
-- **Reasoning operators:** deductive, causal, contrastive, counterfactual,
-  abductive, and analogical branches belong to experts and execute through
-  explicit HarMax pools.
+## The core memory mechanism: two separate Engram tables
 
-In one line:
+The frozen phrase memory consists of **two independent tables**. They have
+separate row numbers, indexes, shards, and manifests.
 
-> Frozen memory supplies stable knowledge; two recurrent blocks carry the
-> developing thought; universal directions, skills, and experts determine how
-> that thought changes.
+| Frozen table | Rows | Exact key | Payload in every row |
+|---|---:|---|---|
+| Trigram Engram | 500,000 | One exact three-word phrase | UTF-8 phrase, frequency, `layer08[2048]` BF16, `layer24[2048]` BF16 |
+| Bigram Engram | 500,000 | One exact two-word phrase | UTF-8 phrase, frequency, `layer08[2048]` BF16, `layer24[2048]` BF16 |
 
-## System Overview
+Each phrase was sent to the donor by itself. The stored values are the donor's
+hidden states at the final non-padding subtoken of that phrase:
+
+```text
+isolated phrase
+  -> one Qwen forward pass
+  -> final non-padding subtoken
+  -> hidden_states[8]  = 2,048-dimensional BF16 vector
+  -> hidden_states[24] = 2,048-dimensional BF16 vector
+  -> write both vectors into that phrase's table row
+```
+
+The phrase text and IDs serve as addresses and trace metadata. The semantic
+content resides in the two hidden-state vectors.
+
+### Why two hidden-state depths are stored
+
+| Donor state | Intended role | Live use |
+|---|---|---|
+| Layer 8 | Earlier lexical and compositional construction | Gives the recipient useful phrase structure before and during early recurrent processing |
+| Layer 24 | Deeper composed phrase meaning | Enters the later contraction path after the live state has acquired context |
+
+A final donor layer would emphasize the donor's output-specific summary. Layers
+8 and 24 preserve two useful stages of representation that the smaller
+recipient can reinterpret through its own recurrent process. Keeping the live
+width at 2,048 also allows each donor row to enter without an early width
+bottleneck.
+
+## Exact lookup and hidden-state retrieval
+
+Lookup happens at every complete-word endpoint. The router checks the longest
+surface phrase first:
+
+```text
+1. Build the exact three-word suffix ending here.
+2. Query the trigram index.
+3. On a hit, receive (bank="trigrams", row_index=i).
+4. On a miss, build the exact two-word suffix.
+5. Query the bigram index.
+6. On a hit, receive (bank="bigrams", row_index=j).
+7. On an exact phrase miss, activate the trainable Hash-Engram path.
+```
+
+The returned row pointer then pulls both frozen vectors:
+
+```text
+bank name + row index
+  -> locate immutable Safetensors shard
+  -> compute local row inside the shard
+  -> load layer08[local_row]
+  -> load layer24[local_row]
+  -> verify phrase mask and source trace
+```
+
+This is an address lookup followed by a payload read. The router never rebuilds
+the hidden states during live execution.
 
 ```mermaid
 flowchart TD
-    A["Text"] --> B["Qwen tokenizer"]
-    B --> C["Raw IDs and offsets"]
-    C --> D["Dendritron 2048D state"]
-    C --> E["Canonical address copy"]
-    E --> F["Sparse memory"]
-    F --> G["Layer-2 joint frame"]
-    D --> H["Block 1: expand"]
-    G --> H
-    H --> I["Block 2: contract"]
-    I -->|"next round"| H
-    I --> J["Euclidean vocabulary rank"]
+    A[Complete-word endpoint] --> B{Exact 3-word suffix?}
+    B -->|hit| C[Trigram table row]
+    B -->|miss| D{Exact 2-word suffix?}
+    D -->|hit| E[Bigram table row]
+    D -->|miss| F[Trainable Hash-Engram]
+    C --> G[Pull layer 8 and layer 24 vectors]
+    E --> G
 ```
 
-The tokenizer, memory address, concept, activation, and operation spaces remain
-separate:
+Example: when the current text ends in `Alexander the Great`, an exact
+trigram hit selects one row from the trigram table and pulls that row's layer-8
+and layer-24 vectors. The bigram table remains a separate fallback address
+space. Lower-order rows may also be exposed for decomposition experiments,
+while the default injection follows longest-match priority.
 
-| Space | Representation | Function |
-|---|---|---|
-| Surface stream | Raw Qwen IDs, UTF-8 spans, punctuation, offsets | Exact input and output identity |
-| Memory address space | Canonical Qwen IDs and complete-word suffixes | Collision-checked phrase lookup and Hash-Engram addressing |
-| Joint concept space | Frozen Qwen layer-2 definition geometry | Shared reference frame for senses, phrases, and live states |
-| Live activation space | \(H\in\mathbb{R}^{T\times 2048}\) | The thought carried through the two-block loop |
-| Weight/operation space | Universal directions, skill LoRAs, expert parameters | Transformations applied to the live thought |
+Punctuation stays in the live Qwen token stream. Frozen phrase lookup uses
+complete-word boundaries: `tree bark,` can retrieve `tree bark`, while a comma
+between the words starts a new phrase segment.
 
-Surface strings, token IDs, word IDs, and sense IDs remain pointers and trace
-metadata. The vectors retain geometric locations rather than storing text inside
-their coordinates.
+Research basis: Memory Grafting supplies frozen final-token donor values and
+longest exact suffix lookup; DeepSeek Engram supplies deterministic conditional
+memory and hash-based miss coverage. Dendritron's extension is the separate
+500k/500k word-phrase inventory with two donor depths per row.
 
-## 1. Offline Knowledge Construction
+## What happens to the two retrieved vectors
 
-### 1.1 Phrase Engrams
-
-A science-first corpus supplies 200 million processed tokens. Frequency and
-content filtering produce two independent inventories:
-
-- 500,000 word bigrams
-- 500,000 word trigrams
-
-For each phrase \(s_i\), the offline donor receives the isolated phrase and
-stores the final non-padding token state from two depths:
-
-\[
-e_i^{(8)}
-=
-F_{\text{Qwen}}(s_i)_{\text{last}}^{(8)}
-\in\mathbb{R}^{2048}
-\]
-
-\[
-e_i^{(24)}
-=
-F_{\text{Qwen}}(s_i)_{\text{last}}^{(24)}
-\in\mathbb{R}^{2048}.
-\]
-
-Each row therefore contains:
+The selected phrase row produces two live payloads:
 
 ```text
-surface_utf8
-frequency
-layer08[2048] BF16
-layer24[2048] BF16
+layer-8 phrase vector
+  -> JTD layer-8 map
+  -> layer-2 joint concept frame
+  -> projected movement into the initial and early recurrent state
+
+layer-24 phrase vector
+  -> JTD layer-24 map
+  -> the same layer-2 joint concept frame
+  -> projected movement into Block 2's later contraction path
 ```
 
-Bigram and trigram rows keep independent row spaces, manifests, and indexes.
-Exact UTF-8 phrase text is the permanent identity; tokenizer IDs are compiled
-addresses.
+The current reference code injects the layer-8 view at initialization and on
+recurrent visits. It exposes the layer-24 view in physical Block 2. Small
+trainable gates begin near zero so the recipient learns how strongly to use
+each frozen donor view.
 
-### 1.2 Definition-Sense Bank
+Relevant files:
 
-Definitions come from versioned lexical sources before Qwen processes them:
+- [`dendritron/retrieval.py`](dendritron/retrieval.py): longest `3 -> 2 -> 1` routing.
+- [`dendritron/jtd.py`](dendritron/jtd.py): exact surface indexes and collision verification.
+- [`dendritron/engram_store.py`](dendritron/engram_store.py): row-to-shard loading of both vectors.
+- [`dendritron/memory_fusion.py`](dendritron/memory_fusion.py): JTD transfer, gating, and staged injection.
 
-- Open English WordNet
-- English Wiktionary
-- MeSH descriptors and supplementary concepts
+## The separate concept route: LNGram, JTD, and layer-2 kNN
 
-Each retained sense becomes one immutable row:
+Phrase lookup answers: **Which stored phrase occurred?**
 
-```text
-sense_row
-word_id
-sense_id
-exact_definition
-ordered_definition_word_ids[]
-layer02[2048] BF16
-source_id
-source_version
-```
+Concept lookup answers: **Which meaning is active in the current context?**
 
-Qwen receives the exact definition text plus a fixed readout marker. The vector
-comes from `hidden_states[2]` at the marker's final token. Layer 2 is used as a
-shallow lexical/compositional concept location; the source definition and graph
-edges remain attached as metadata.
+The definition bank is a third frozen asset, separate from both phrase tables.
+Each dictionary sense owns one Qwen layer-2 vector plus exact source metadata
+and ordered links to the words in its definition.
 
-### 1.3 Universal LoRA Directions
-
-The universal subspace is fitted in weight-update space from successful LoRA
-adapters targeting the same recipient operator:
-
-\[
-\Delta W_t = B_tA_t
-\]
-
-\[
-\{\Delta W_t\}_{t=1}^{n}
-\xrightarrow{\text{center + HOSVD/SVD}}
-\{U_i\}_{i=1}^{r},
-\qquad r\in[16,32].
-\]
-
-The first 16 directions form the initial common foundation. Persistent
-orthogonal residual structure can expand the basis toward 32 directions during
-consolidation. Definition vectors remain in the concept bank; universal
-directions remain in LoRA weight space.
-
-## 2. Runtime Memory
-
-Phrase memory and word-sense memory operate in parallel.
-
-### 2.1 Phrase route
-
-At each complete-word endpoint:
-
-\[
-M_t^{\mathrm{phrase}}=
-\begin{cases}
-E_3(w_{t-2:t}), & \text{exact trigram hit}\\
-E_2(w_{t-1:t}), & \text{exact bigram hit}\\
-H(\pi(x_{t-n+1:t})), & \text{frozen phrase miss}
-\end{cases}
-\]
-
-where:
-
-- \(E_3\) and \(E_2\) return the paired layer-8/layer-24 donor rows;
-- \(\pi\) is the frozen raw-ID to canonical-ID projection;
-- \(H\) is the multi-head trainable Hash-Engram fallback.
-
-### 2.2 Definition route
-
-For every active word \(w_t\), the dictionary independently returns every
-retained sense:
-
-\[
-D_t=\{d_{t,1},d_{t,2},\ldots,d_{t,S_t}\}.
-\]
-
-All sense points stay available. Context supplies continuous locality weights
-inside the joint frame:
-
-\[
-\omega_{t,s}
-=
-\frac{
-\left(\|P_hh_t-d_{t,s}\|_2^2+\epsilon^2\right)^{-\nu/2}
-}{
-\sum_j
-\left(\|P_hh_t-d_{t,j}\|_2^2+\epsilon^2\right)^{-\nu/2}
-}.
-\]
-
-This lets phrase-level memory and single-word meaning contribute together. It
-also preserves polysemy as geometry: context changes influence continuously
-instead of deleting the unused senses.
-
-### 2.3 Punctuation contract
-
-- Raw punctuation remains in the Qwen input, recurrent state, and output stream.
-- Frozen word-Engram lookup crosses whitespace and stops at punctuation or
-  symbols between complete words.
-- Trailing punctuation preserves the preceding word or phrase hit at that
-  word's token endpoint.
-- Internal apostrophes and hyphens remain part of the word.
-- Hash Engram sees canonicalized Qwen suffixes, including punctuation classes.
-
-### 2.4 Memory-bank roles
-
-| Bank | Key | Value | State |
-|---|---|---|---|
-| Trigram Engram | Exact three-word suffix | Layer 8 and layer 24, each 2,048D BF16 | Frozen |
-| Bigram Engram | Exact two-word suffix | Layer 8 and layer 24, each 2,048D BF16 | Frozen |
-| Definition bank | Word and sense IDs | Layer 2, 2,048D BF16 plus source graph | Frozen |
-| Hash Engram | Canonical Qwen 2/3-token suffix hashes | Multi-head trainable rows | Trainable |
-| LNGram | Discretized live-state 2/3-grams | Route-partitioned trainable rows | Trainable |
-| Experience tier | Successful coefficient and outcome traces | Reusable episode priors | Appendable target |
-
-## 3. Joint Transfer Domain
-
-The frozen layer-2 definition geometry is the numerical reference frame:
-
-\[
-P_d(d_s)=d_s.
-\]
-
-Separate learned maps place each additional source into that frame:
-
-\[
-z_8=P_8e^{(8)},\qquad
-z_{24}=P_{24}e^{(24)},\qquad
-z_h=P_hh.
-\]
-
-Same-content anchor pairs fit \(P_8\), \(P_{24}\), and \(P_h\) with point
-alignment and locality-preservation losses. A final map \(P_{J\rightarrow H}\)
-converts joint-space movement back into the recipient's live coordinates.
-
-Two repository components have historically used the JTD name:
-
-| Component | File | Actual role |
-|---|---|---|
-| Surface compiler | [dendritron/jtd.py](dendritron/jtd.py) | Builds canonical token/word addresses, exact collision verification, and row pointers |
-| Numerical transfer | [dendritron/joint_transfer.py](dendritron/joint_transfer.py) | Aligns layer 8, layer 24, and live states to the fixed layer-2 concept frame |
-
-Keeping these jobs separate prevents lookup labels from becoming vector
-contents.
-
-## 4. Euclidean HarMax Contraction
-
-Each live query \(q\) interacts with a causally valid pool of anchors
-\(\{a_i\}\). After RMS normalization:
-
-\[
-d_i^2=\|a_i-q\|_2^2+\epsilon^2
-\]
-
-\[
-p_i
-=
-\frac{(d_i^2)^{-\nu/2}}
-{\sum_j(d_j^2)^{-\nu/2}}
-\]
-
-\[
-y_i
-=
-\frac{[e_i]_+\mathbf{1}_{\mathrm{supported}(i)}}
-{\sum_j[e_j]_+\mathbf{1}_{\mathrm{supported}(j)}}
-\]
-
-\[
-c_i=y_i-p_i
-\]
-
-\[
-\Delta q
-=
-\nu\sum_i
-c_i\frac{a_i-q}{d_i^2}.
-\]
-
-Positive \(c_i\) produces attraction toward supported evidence. Negative \(c_i\)
-produces repulsion from excess distance mass. The harmonic cross-entropy
-
-\[
-\mathcal{R}_H=-\sum_i y_i\log p_i
-\]
-
-acts as the branch residual, and
-
-\[
-\mathrm{confidence}=(1+\mathcal{R}_H)^{-1}
-\]
-
-supplies a bounded confidence signal.
-
-The contraction geometry is ordinary Euclidean geometry. Learnable linear maps
-remain in source alignment, LoRA adapters, and expert transforms.
-
-## 5. Two Physical Blocks Carry Thought
-
-For round \(r\) and physical block \(k\in\{1,2\}\), the first residual sublayer
-performs geometric contraction:
-
-\[
-C_{k,r}
-=
-\Delta_{\mathrm{context}}
-+\Delta_{\mathrm{memory}}
-+\Delta_{\mathrm{LNGram}}
-+\Delta_{\mathrm{typed\ branch}}
-\]
-
-\[
-U_{k,r}
-=
-\operatorname{RMSNorm}
-\left(
-\alpha H_{k,r}+C_{k,r}
-\right).
-\]
-
-The second residual sublayer performs conditional computation:
-
-\[
-E_{k,r}
-=
-\Delta_{\mathrm{universal}}
-+\Delta_{\mathrm{skills}}
-+\Delta_{\mathrm{experts}}
-\]
-
-\[
-H_{k,r}^{+}
-=
-\operatorname{RMSNorm}
-\left(
-\alpha U_{k,r}+E_{k,r}
-\right).
-\]
-
-Block 2 returns \(H_{2,r}^{+}\) to Block 1 for the next round. This recurrent
-state carries the developing thought; memory remains sparsely addressable at
-every visit.
-
-The intended complementary roles are:
-
-| Block | Recurrent bias |
+| Definition field | Function |
 |---|---|
-| Block 1 | Expand relations, candidate explanations, and possible conclusions |
-| Block 2 | Contrast, verify, contract, and integrate supported candidates |
+| `layer02[2048]` | Fixed concept location |
+| word ID and sense ID | Lookup and trace pointers |
+| exact definition | Source record |
+| ordered definition-word IDs | Graph links showing how the definition is constructed |
 
-The stored blocks have independent parameters. Typed branch execution will make
-their expansion/contraction roles explicit at the semantic level.
+The intended live concept resolver is:
 
-For \(K=2\) physical blocks and \(R\) rounds:
+```text
+evolving hidden state
+  -> LNGram projection
+  -> hard latent 2/3-gram symbol address
+  -> concept region / candidate neighborhood
 
-\[
-N=KR=2R,
-\qquad
-\alpha=\sqrt{2N},
-\qquad
-\beta=(8N)^{-1/2}.
-\]
+live state + retrieved layer-8 vector + retrieved layer-24 vector
+  -> separate JTD maps
+  -> fixed Qwen layer-2 definition geometry
+  -> Euclidean k-nearest-neighbor search inside the routed concept region
+  -> one active definition-sense vector and its source trace
+```
 
-\(\alpha\) scales the skip path on every Post-RMSNorm visit. \(\beta\) is a
-one-time initialization gain on designated residual-branch matrices.
+LNGram makes the concept address repeatable without depending on surface token
+identity. JTD aligns unlike vector sources into the same concept geometry while
+leaving every layer-2 definition vector at its original donor location. The
+Euclidean neighbor step chooses the meaning that the current context actually
+occupies. For a polysemous word such as `bark`, the tree sense and dog sense
+remain separate points; the live state resolves one active sense.
 
-## 6. Universal Directions, Skills, and Experts
+```mermaid
+flowchart TD
+    A[Live hidden state] --> B[LNGram latent 2/3-gram address]
+    B --> C[Concept region]
+    D[Layer 8 + layer 24 phrase views] --> E[JTD alignment]
+    A --> E
+    E --> F[Fixed layer-2 definition geometry]
+    C --> G[Euclidean kNN]
+    F --> G
+    G --> H[One active sense anchor + trace]
+```
 
-These are three distinct levels:
+Words, token IDs, sense IDs, and definition-word IDs remain outside the vector
+coordinates. They locate and explain the retrieved point; the point itself is
+the learned concept geometry.
 
-| Level | Geometry | Role |
+Research basis: [Lngram](https://arxiv.org/abs/2605.24869) supplies hidden-state
+discretization and exact latent n-gram lookup. [Locality Preserving Joint
+Transfer](https://arxiv.org/abs/1906.07441) supplies separate source mappings
+into a neighborhood-preserving shared frame. Dendritron fixes Qwen layer-2
+definition senses as the frame and connects the LNGram address to Euclidean
+concept-neighbor retrieval.
+
+### Current implementation boundary for concept resolution
+
+The repository already contains LNGram lookup, separate JTD maps for layer 8,
+layer 24, and the live state, and Euclidean definition weighting. The current
+reference payload builder retains every exact word-sense candidate and computes
+an inverse-distance field across those candidates. The target architecture
+above requires the final LNGram-routed concept-region kNN executor to return one
+active sense. That executor remains an explicit implementation milestone.
+
+## Universal subspace, shared LoRA skills, and experts
+
+These are three different forms of capacity.
+
+| Level | Geometry | Purpose |
 |---|---|---|
-| Universal directions | 16-32 frozen low-rank directions in LoRA weight space | Common structure shared across successful adapters |
-| Skills | Learnable low-rank LoRA adapters extending the universal core | Reusable operations shared across tasks and experts |
-| Experts | High-dimensional conditional modules outside the low-rank basis | Task/domain specialization and branch ownership |
+| Universal subspace | Roughly 16-32 principal directions in low-rank weight-update space | Common transformation structure found across successful adapters |
+| Shared LoRA skills | Learnable low-rank adapters built on and beyond the universal directions | Reusable operations such as comparison, causal analysis, retrieval control, or mathematical manipulation |
+| Experts | High-dimensional conditional modules outside the low-rank basis | Specialized domain/task junctions that own reasoning branches |
 
-An expert-conditioned update has the conceptual form:
+The universal subspace is the common coordinate system. A skill is an actual
+learnable adapter operating in that system. An expert is a larger specialist
+selected through skill adjacency. This separation keeps common operations
+compact while preserving high-dimensional capacity for specialized work.
 
-\[
-\Delta h_e
-=
-\sum_i a_{e,i}U_i(h)
-+\sum_k s_{e,k}L_k(h)
-+E_e(h).
-\]
+The geometric router seeks the smallest sufficient set of skills for the
+current task. Selected skill IDs open a bounded neighborhood of adjacent
+experts, so the global comparison remains small even as the expert library
+grows.
 
-The live state selects a sparse set of skills. Skill adjacency narrows the
-eligible expert set. Each expert connects:
+Research basis: [Shared LoRA Subspaces for Almost Strict Continual
+Learning](https://arxiv.org/abs/2602.06043) supports a continually refined
+foundational adapter subspace and compact task coefficients. Dendritron treats
+those reusable adapters as skills and places high-dimensional experts beyond
+the shared low-rank foundation.
 
-```text
-knowledge and concept IDs
-task relation
-shared skill IDs
-typed BranchSpec records
-optional coefficient prior
-source and outcome traces
-```
+## How user learning becomes LoRA Engram memory
 
-The two-block activation carries the thought. Universal directions, skills, and
-experts determine the transformations applied to it.
-
-### Current generic expert transform
-
-The runnable core currently executes generic trainable branches:
-
-\[
-z_j=\tanh(W_{c,j}h)\odot\sigma(W_{g,j}h)
-\]
-
-\[
-u_j=W_{o,j}z_j
-\]
-
-\[
-q_j=\cos(u_j,e_j)
-\]
-
-\[
-E_e(h)
-=
-\sum_j
-\frac{q_j}{\sum_l|q_l|+\epsilon}u_j.
-\]
-
-This validates sparse expert selection, high-dimensional branch computation,
-signed combination, recurrent integration, and gradient flow.
-
-### Typed semantic branch target
-
-Each typed branch will consume:
+Learning happens in stages rather than rewriting the full model for every
+interaction:
 
 ```text
-operator identity
-bound premise and conclusion roles
-positive and opposing anchors
-causal visibility mask
-active skill IDs
-exact memory and source pointers
+1. Route the task through a small set of shared skill LoRAs.
+2. Train temporary user/episode coefficients and any permitted residual skill update.
+3. Record the concept IDs, skills, experts, branch outcome, and success evidence.
+4. Commit a successful trace to the user's experience Engram tier.
+5. Reuse that trace as a prior when the same concept-task neighborhood returns.
+6. During consolidation, absorb recurring residual structure into an existing skill
+   or add a new orthogonal direction when the evidence supports a genuinely new skill.
 ```
 
-and return:
+The experience Engram preserves personal, local adaptation. Shared skills
+preserve operations that repeatedly generalize. The universal subspace changes
+more slowly and only through consolidation. This provides continual learning
+while keeping active updates sparse and low rank.
+
+Experience-tier commits and consolidation are part of the target architecture;
+the current repository contains their schemas and shared-subspace utilities,
+with the complete per-user runtime still to be connected.
+
+## Task -> skill -> expert -> branch -> DeepLoop
+
+A task is the current relation to solve, such as proving a conclusion,
+comparing two claims, explaining a cause, or constructing a counterfactual.
+The task combines with retrieved concept evidence to activate shared skills.
+Those skills restrict expert selection. Each selected expert owns its own
+candidate reasoning branches.
+
+```mermaid
+flowchart TD
+    A[Task + memory + active concept] --> B[Smallest sufficient skill set]
+    B --> C[Adjacent high-dimensional experts]
+    C --> D[Expert-owned typed branches]
+    D --> E[Block 1 expands candidates]
+    E --> F[Block 2 contracts against evidence]
+    F -->|next round| A
+```
+
+Branches come from experts because their premises, anchors, and valid
+operations depend on the expert's domain. The typed branch vocabulary is:
+
+| Branch | Core operation |
+|---|---|
+| Deductive | Bind premises and test whether a candidate conclusion is jointly supported |
+| Causal | Bind cause, mechanism, and effect under causal order constraints |
+| Contrastive | Preserve the dimensions that distinguish competing candidates |
+| Counterfactual | Change one bound condition and propagate the resulting differences |
+| Abductive | Rank candidate explanations against observed evidence and contradictions |
+| Analogical | Transfer a relation structure between concept neighborhoods |
+
+Every branch returns a proposed movement of the hidden state, signed evidence,
+a harmonic residual, confidence, and exact memory/source pointers.
+
+### Where the two-block DeepLoop sits
+
+DeepLoop wraps the entire active hierarchy.
+
+- **Physical Block 1 expands.** It opens relevant skills, experts, relations,
+  and candidate branches.
+- **Physical Block 2 contracts.** It compares candidates with retrieved memory,
+  opposing anchors, causal visibility, and branch evidence.
+- **The resulting hidden state returns to Block 1.** Each round reuses the same
+  two stored blocks, giving effective depth `2R` for `R` rounds.
+
+The hidden state carries the thought from round to round. Engram rows remain
+stable anchors. Skills, experts, and branches determine how the thought moves
+relative to those anchors.
+
+[DeepLoop](https://arxiv.org/abs/2607.13491) supports loop-aware scaling for
+reused blocks. For `N = 2R` unrolled block visits, Dendritron uses
+`alpha = sqrt(2N)` on the Post-RMSNorm skip path and the one-time residual
+matrix initialization gain `beta = 1/sqrt(8N)`.
+
+## Geometric attention and branch contraction
+
+Routing and evidence use Euclidean geometry. Each branch builds a small causal
+pool containing retrieved phrase vectors, the active layer-2 sense, LNGram
+concept records, premises, candidate conclusions, and supporting or opposing
+anchors.
+
+For each anchor, the branch compares two masses:
 
 ```text
-branch movement
-signed evidence
-harmonic residual
-confidence
-source trace
-candidate or verified conclusion
+p = mass implied by Euclidean distance from the current hidden state
+y = mass assigned by bound evidence and the branch operator
+c = y - p
 ```
 
-The first complete executor should be deductive. The same interface then
-supports causal, contrastive, counterfactual, abductive, and analogical
-operators.
+Positive `c` attracts the thought toward underrepresented supported evidence.
+Negative `c` repels it from excess or contradictory mass. The harmonic residual
+measures how much branch evidence remains unresolved. This is the geometric
+attention mechanism: a sparse signed field over explicit anchors, followed by
+recurrent integration.
 
-## 7. Fixed 25/75 Capacity Law
+The runtime geometry uses Euclidean distance for HarMax contraction, concept
+neighbors, LNGram readout, and vocabulary ranking. Bilinear runtime operator
+count: `0`.
 
-Dendritron treats the split as an architectural invariant:
+## CPU/ARM execution model
 
-\[
-P_M
-=
-P_{\mathrm{phrase}}
-+P_{\mathrm{definition}}
-+P_{\mathrm{hash}}
-+P_{\mathrm{LNGram}}
-+P_{\mathrm{experience}}
-\]
+The live architecture reduces GPU dependence through five linked choices:
 
-\[
-P_C
-=
-P_{\mathrm{universal}}
-+P_{\mathrm{skills}}
-+P_{\mathrm{experts}}
-+P_{\mathrm{branch\ executors}}
-\]
+1. Qwen hidden-state extraction is a one-time offline job.
+2. Exact trigram and bigram lookup fetches only the selected rows.
+3. Frozen tables can reside in CPU memory, memory-mapped storage, or an NVMe
+   hierarchy with deterministic prefetch.
+4. Two physical blocks are reused for additional reasoning depth.
+5. Skills are low-rank and experts activate sparsely.
 
-\[
-P_M=\frac{1}{4}(P_M+P_C),
-\qquad
-P_C=\frac{3}{4}(P_M+P_C),
-\qquad
-P_C=3P_M.
-\]
+The PyTorch code is the semantic reference implementation. The production path
+targets packed BF16/INT8 memory, quantized linear kernels, vectorized Euclidean
+distance, and ARM-aware sparse row fetch.
 
-This is a capacity-allocation law over scalable conditional memory and compute.
-The two shared recurrent blocks are a fixed active substrate and are reported
-separately. Hidden width, activation energy, runtime FLOPs, and wall time each
-receive their own measurements.
+## What exists today
 
-Engram and LNGram experiments provide empirical support near the same 25/75
-boundary. In this architecture the ratio is fixed by the wider memory/compute
-design rather than selected as a tuning sweep.
+Status on 3 August 2026:
 
-The executable ledger lives in
-[dendritron/capacity.py](dendritron/capacity.py).
+| Subsystem | Status |
+|---|---|
+| 500k bigram and 500k trigram inventories | Reported complete; external tables are represented here by manifests and builders |
+| Separate layer-8/layer-24 payloads for both phrase tables | Reported complete; the immutable payloads remain outside the public repository |
+| Longest trigram -> bigram -> dictionary resolver | Implemented and tested with synthetic data |
+| Row pointer -> shard -> layer-8/layer-24 payload loading | Implemented |
+| Qwen layer-2 definition extraction pipeline | Implemented as a resumable builder |
+| JTD source maps and fitting objective | Implemented; real-anchor fitting remains a data run |
+| LNGram, Hash-Engram, Euclidean HarMax, two-block recurrence | Implemented in the CPU reference core |
+| Universal/skill/expert structural route | Implemented with generic trainable expert transforms |
+| One-sense LNGram/JTD concept-region kNN | Target contract specified; live executor remains |
+| Typed deductive, causal, contrastive, counterfactual, abductive, and analogical branches | Target contract specified; live executors remain |
+| User LoRA Engram commits and consolidation | Target contract specified; full runtime remains |
+| Full real-memory training and language-quality evaluation | Experimental milestone |
+| Optimized ARM runtime | Engineering milestone after reference validation |
 
-## 8. Softmax-Free Output Geometry
+The recorded CPU reference run in [`VALIDATION_V1.3.md`](VALIDATION_V1.3.md)
+reports 61 passing tests, forward/backward execution through both recurrent
+blocks, checkpoint reload, and the exact 25/75 capacity ledger. Those checks
+establish structural execution. Language quality and typed reasoning remain
+experimental results to earn.
 
-The final state is compared with the Dendritron token-embedding table through
-chunked Euclidean distance:
+## External assets omitted from GitHub
 
-\[
-\ell_v
-=
--\frac{
-\left\|
-\widehat{W_oh_t}
--\widehat{E_{\mathrm{tok}}[v]}
-\right\|_2^2
-}{d}.
-\]
+| Asset | Contract |
+|---|---|
+| Bigram donor bank | 500,000 rows; two 2,048D BF16 vectors per row; about 4.096 GB raw vector payload |
+| Trigram donor bank | 500,000 rows; two 2,048D BF16 vectors per row; about 4.096 GB raw vector payload |
+| Definition bank | One 2,048D layer-2 BF16 vector per retained sense plus source graph |
+| Surface indexes | Exact trigram, bigram, and dictionary addresses with row pointers and fingerprints |
+| JTD checkpoint | Layer-8, layer-24, live-to-joint, and joint-to-live maps |
+| Universal directions | Per-block low-rank input/output directions and consolidation report |
 
-Training uses a hard-negative rank-margin objective:
+Every external asset carries its source fingerprint, tokenizer revision, shape,
+dtype, row count, and SHA-256 manifest.
 
-\[
-\mathcal{L}_{\mathrm{rank}}
-=
-\sum_{v^-\in\mathcal N}
-\max(0,\gamma-\ell_{v^+}+\ell_{v^-}).
-\]
-
-Generation can use raw-score argmax, top-k score selection, or rank-based
-sampling. The current reference path implements chunked distance scoring,
-rank-margin loss, and greedy generation.
-
-## 9. CPU/ARM Execution Model
-
-The live path uses:
-
-- sparse CPU/disk row lookup;
-- memory-mapped frozen BF16 assets;
-- deterministic integer address compilation;
-- bounded causal HarMax pools;
-- route-partitioned LNGram tables;
-- sparse skill and expert activation;
-- two reused physical blocks;
-- chunked vocabulary distance.
-
-The PyTorch implementation is the semantic reference. Production deployment
-then specializes the same graph with packed BF16/INT8 tables, quantized linear
-kernels, vectorized Euclidean distance, and ARM-aware sparse row fetch.
-
-Qwen weights participate during offline phrase and definition extraction.
-Runtime keeps the Qwen tokenizer files, frozen donor rows, and the smaller
-Dendritron recipient.
-
-## 10. Current Implementation Boundary
-
-Status as of 2026-08-03:
-
-| Subsystem | Current state | Evidence |
-|---|---|---|
-| 500k bigram and 500k trigram inventories | Reported complete; large tables live outside this share folder | Stage-1 manifests and extraction records |
-| Layer-8/layer-24 phrase donor banks | Reported complete; large tables live outside this share folder | Stage-2 extraction and shard-validation code |
-| Definition-source acquisition and inventory | Pipeline coded and dependency-free tests passing | `stage3_dictionary/` and definition tests |
-| Layer-2 definition extraction | Resumable pipeline coded | `modal_extract_definition_states.py` |
-| Qwen canonical projection and surface index | Compiler coded; synthetic punctuation, collision, and 3/2/1 tests passing | `tokenizer.py`, `jtd.py`, `memory_pipeline.py` |
-| Numerical joint transfer | Maps and fitting objective coded; real-anchor fit remains a data run | `joint_transfer.py`, `fit_joint_transfer_domain.py` |
-| Hash Engram and LNGram | Runtime modules coded and tensor-tested in the recorded CPU run | `hash_engram.py`, `lngram.py` |
-| Euclidean HarMax | Runtime module coded and tensor-tested in the recorded CPU run | `geometric_attention.py` |
-| Two-block recurrent core | Structural forward/backward path recorded on CPU | `recurrent_core.py`, `model.py` |
-| Universal/skill/expert hierarchy | Runtime structural path coded; generic expert branches execute | `working_adapter.py`, `shared_skill_subspace.py` |
-| Typed expert branches | Operator records and mathematical contract specified | Next runtime implementation |
-| Full corpus training and language-quality evaluation | Experimental stage | Begins after real-data integration |
-| Optimized ARM runtime | Engineering stage | Follows reference-model validation |
-
-The recorded [VALIDATION_V1.3.md](VALIDATION_V1.3.md) run used
-PyTorch `2.7.1+cpu` with CUDA availability reported as `false`:
-
-| Recorded check | Result |
-|---|---:|
-| Test suite | 61/61 passed |
-| Tensor tests | 15/15 passed |
-| Tiny optimizer loss | 0.206182 -> 0.186076 in 30 steps |
-| Tiny next-token accuracy | 2.34% -> 35.16% |
-| Median tiny forward latency | 15.766 ms |
-| Checkpoint reload | Passed |
-| Conditional capacity ledger | Exact 25/75 |
-
-That smoke run establishes executable tensor shapes, causality, finite
-distances, gradient flow, recurrent reuse, and checkpoint integrity. Language
-quality becomes measurable after real memory integration and corpus training.
-
-A packaging recheck on 2026-08-03 discovered 65 tests through the Python
-standard-library runner: 50 dependency-free tests passed, and the packaging
-runtime reported the 15 PyTorch tensor tests as skipped.
-
-## 11. External Table Manifest
-
-The shareable source folder can omit the large tables while retaining this
-contract:
-
-| External asset | Required shape or contents | Raw vector payload |
-|---|---|---:|
-| Bigram donor bank | 500,000 rows x two views x 2,048 BF16 | 4,096,000,000 bytes |
-| Trigram donor bank | 500,000 rows x two views x 2,048 BF16 | 4,096,000,000 bytes |
-| Definition bank | \(N_{\mathrm{sense}}\) rows x 2,048 BF16 | \(4096N_{\mathrm{sense}}\) bytes |
-| Phrase metadata | UTF-8 surface, frequency, row, bank, shard, fingerprints | Data-dependent |
-| Dictionary graph | word IDs, sense IDs, exact definitions, ordered definition-word edges | Data-dependent |
-| Surface index | Canonical token tuples, complete-word keys, collision buckets, row pointers | Data-dependent |
-| JTD checkpoint | \(P_8,P_{24},P_h,P_{J\rightarrow H}\) and fit manifest | Data-dependent |
-| Universal directions | Per-block input/output LoRA directions and variance report | Data-dependent |
-
-Every external asset should carry its exact source fingerprint, tokenizer
-revision, shape, dtype, row count, and SHA-256 manifest.
-
-## 12. Repository Map
+## Repository map
 
 | Path | Purpose |
 |---|---|
-| [dendritron/model.py](dendritron/model.py) | End-to-end recipient model |
-| [dendritron/recurrent_core.py](dendritron/recurrent_core.py) | Two physical blocks and recurrent schedule |
-| [dendritron/geometric_attention.py](dendritron/geometric_attention.py) | Euclidean HarMax contraction |
-| [dendritron/memory_pipeline.py](dendritron/memory_pipeline.py) | Surface resolution and Hash-Engram activation |
-| [dendritron/memory_fusion.py](dendritron/memory_fusion.py) | Phrase, definition, and hash memory injection |
-| [dendritron/joint_transfer.py](dendritron/joint_transfer.py) | Numerical layer-2 joint frame |
-| [dendritron/lngram.py](dendritron/lngram.py) | Hidden-state discretization and latent n-gram memory |
-| [dendritron/working_adapter.py](dendritron/working_adapter.py) | Universal directions, skills, and high-dimensional experts |
-| [dendritron/shared_skill_subspace.py](dendritron/shared_skill_subspace.py) | Offline shared LoRA basis and coefficient projection |
-| [dendritron/expert_graph.py](dendritron/expert_graph.py) | Knowledge/task/skill/branch junction records |
-| [dendritron/output_geometry.py](dendritron/output_geometry.py) | Euclidean vocabulary ranking and loss |
-| [dendritron/capacity.py](dendritron/capacity.py) | Fixed 25/75 capacity ledger |
-| [stage4_subspace/qwen_lora_universal_directions.py](stage4_subspace/qwen_lora_universal_directions.py) | HOSVD/SVD extraction of universal LoRA directions |
-| [tests/](tests/) | Addressing, memory, geometry, recurrence, capacity, and gradient contracts |
+| [`modal_extract_states.py`](modal_extract_states.py) | Builds both 500k phrase tables and writes layer-8/layer-24 rows |
+| [`dendritron/engram_store.py`](dendritron/engram_store.py) | Loads both hidden-state vectors from an exact phrase row |
+| [`dendritron/retrieval.py`](dendritron/retrieval.py) | Longest trigram/bigram/dictionary routing |
+| [`dendritron/jtd.py`](dendritron/jtd.py) | Collision-safe surface index |
+| [`dendritron/joint_transfer.py`](dendritron/joint_transfer.py) | Layer-2 joint concept frame |
+| [`dendritron/lngram.py`](dendritron/lngram.py) | Hidden-state discretization and latent n-gram lookup |
+| [`dendritron/memory_fusion.py`](dendritron/memory_fusion.py) | Staged donor-vector and definition injection |
+| [`dendritron/recurrent_core.py`](dendritron/recurrent_core.py) | Two physical blocks and repeated rounds |
+| [`dendritron/working_adapter.py`](dendritron/working_adapter.py) | Universal directions, shared skills, and high-dimensional experts |
+| [`dendritron/expert_graph.py`](dendritron/expert_graph.py) | Task/skill/expert/branch ownership records |
+| [`dendritron/capacity.py`](dendritron/capacity.py) | Fixed 25/75 conditional-capacity ledger |
 
-## 13. Reproducing the Structural Checks
+## Immediate implementation order
 
-Python dependencies for the complete tensor suite include PyTorch 2.7+, NumPy,
-and Safetensors.
+1. Replace the current all-candidate definition field with the LNGram-routed
+   layer-2 concept-region kNN resolver that returns one active sense.
+2. Materialize the real phrase and definition payloads through the surface
+   index and fit the JTD maps.
+3. Implement one complete deductive expert branch with source trace.
+4. Extend the same branch interface to the remaining five operator types.
+5. Connect user LoRA experience commits and consolidation.
+6. Train and measure language quality, memory utilization, loop convergence,
+   CPU throughput, and peak memory.
+
+## Reproducing the structural checks
 
 ```bash
 python -m unittest discover -s tests -v
 python smoke_cpu_core.py --steps 30 --device cpu
 ```
 
-The real-data sequence is:
+## Mechanism lineage
 
-```bash
-modal run modal_prepare_definition_sources.py
-modal run modal_extract_definition_states.py --inventory-only
-modal run modal_extract_definition_states.py
-modal run modal_build_joint_transfer_domain.py
+| Research source | Mechanism taken from the paper | Dendritron extension |
+|---|---|---|
+| [Conditional Memory via Scalable Lookup](https://arxiv.org/abs/2601.07372) | Deterministic n-gram conditional memory, tokenizer compression, hash coverage | Two exact word-phrase banks tied to grafted donor states and CPU/ARM execution |
+| [Memory Grafting](https://arxiv.org/abs/2605.20948) | Offline final-token donor states and longest exact lookup | Layer 8 plus layer 24 per row, science-first 500k/500k inventories, JTD staging |
+| [Lngram](https://arxiv.org/abs/2605.24869) | Hidden-state discretization and exact latent n-gram memory | Concept-region address connected to layer-2 sense geometry and skills |
+| [Locality Preserving Joint Transfer](https://arxiv.org/abs/1906.07441) | Separate source projections and neighborhood preservation | Layer-2 definition bank fixed as the shared semantic frame |
+| [Shared LoRA Subspaces](https://arxiv.org/abs/2602.06043) | Foundational low-rank adapter basis and continual coefficient updates | Shared adapters become skills; user experience becomes LoRA Engram memory |
+| [DeepLoop](https://arxiv.org/abs/2607.13491) | Stable scaling for repeatedly visited physical blocks | Complementary expansion/contraction roles around expert-owned branches |
+| [Collision-Free Hot-Tier Extension](https://arxiv.org/abs/2601.16531) | MPHF hot tier, fingerprints, collision and gating diagnostics | Exact frozen phrase rows, verified address buckets, and separate trainable miss memory |
 
-python stage3_jtd/fit_joint_transfer_domain.py \
-  --anchors /data/dendritron-jtd-anchors.npz \
-  --output /data/dendritron-jtd-projections.pt
-```
-
-The completed phrase banks remain immutable through these steps.
-
-## 14. Immediate Engineering Milestone
-
-The next architecture-defining implementation is one complete typed deductive
-branch:
-
-```text
-premise pointers
-  -> semantic role binding
-  -> candidate conclusion points
-  -> contradiction and support anchors
-  -> causal HarMax pool
-  -> signed attraction/repulsion
-  -> branch residual and confidence
-  -> conclusion plus exact source trace
-```
-
-Block 1 should propose several candidate conclusions. Block 2 should evaluate
-them against supporting and opposing evidence, preserve the supported
-conclusion, and return its trace into the next loop round.
-
-Once this interface works for deduction, the same executor contract can host
-causal, contrastive, counterfactual, abductive, and analogical pools.
-
-The remaining integration order is:
-
-1. Make definition-sense retrieval parallel to phrase retrieval in the live
-   payload builder.
-2. Implement and test the deductive branch executor.
-3. Generalize the typed branch interface to the remaining operators.
-4. Compile or verify the real definition bank, surface index, and JTD maps.
-5. Fit the 16-32 universal directions from successful task LoRAs.
-6. Train the full recipient on CPU/ARM and record memory hits, branch residuals,
-   loop convergence, token rank, throughput, and peak memory.
-7. Port the validated graph to quantized CPU/ARM kernels.
-
-## 15. Mechanism Lineage
-
-| Research source | Mechanism used here |
-|---|---|
-| *Memory Grafting: Scaling Language Model Pre-training via Offline Conditional Memory* | Offline donor states, final-token phrase values, longest exact lookup, lightweight projection and gating |
-| *Conditional Memory via Scalable Lookup* | Canonical token projection, deterministic conditional memory, multi-head hash coverage |
-| *Lngram: N-gram Conditional Memory in Latent Space* | Learned low-bit route symbols and latent 2/3-gram lookup |
-| *Shared LoRA Subspaces for Almost Strict Continual Learning* | Principal LoRA factors, compact coefficients, orthogonal residuals, consolidation |
-| *DeepLoop: Depth Scaling for Looped Transformers* | Two stored blocks, repeated visits, Post-RMSNorm, loop-aware \(\alpha/\beta\) scaling |
-| *Harmonic Loss Trains Interpretable AI Models* | Euclidean HarMax mass, harmonic cross-entropy, and the \(y-p\) derivative |
-| *Locality Preserving Joint Transfer* | Point and neighborhood preservation across source geometries |
-
-The Dendritron-specific synthesis is the complete interaction among explicit
-frozen memory, latent conditional memory, Euclidean HarMax reasoning pools,
-shared LoRA skills, high-dimensional expert junctions, fixed 25/75 capacity,
-and a two-block recurrent thought engine built for CPU/ARM execution.
+The original Dendritron notes supplied the architectural starting point and the
+CPU/ARM objective. This repository records Ryan Carson's synthesis, extensions,
+reference implementation, and the remaining experimental boundary.
