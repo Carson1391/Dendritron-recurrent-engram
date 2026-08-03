@@ -1,0 +1,36 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Large generated memory assets and donor tables
+data/
+tables/
+shards/
+checkpoints/
+*.bf16
+*.bin
+*.npy
+*.npz
+*.safetensors
+*.pt
+*.pth
+
+# Temporary and generated working output
+tmp/
+output/
+*.log
+
+# Keep the small validation record committed
+!artifacts/cpu_smoke_v1.3.json
+!artifacts/README.md

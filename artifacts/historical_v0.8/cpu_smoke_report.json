@@ -1,0 +1,40 @@
+{
+  "architecture_version": "0.8",
+  "date": "2026-07-31",
+  "device": "cpu",
+  "cuda_available": false,
+  "python": "3.12",
+  "pytorch": "2.7.1+cpu",
+  "tests": {
+    "passed": 48,
+    "failed": 0,
+    "elapsed_seconds": 1.273
+  },
+  "training": {
+    "steps": 100,
+    "sequence_length": 24,
+    "batch_size": 16,
+    "initial_margin_loss": 0.4599353373,
+    "final_margin_loss": 0.0489510037,
+    "final_next_byte_accuracy": 0.39583334,
+    "checkpoint": "artifacts/tiny_dendritron_cpu.pt"
+  },
+  "latency": {
+    "token_count": 25,
+    "loop_rounds": 2,
+    "physical_blocks": 2,
+    "median_milliseconds": 13.8065,
+    "p95_milliseconds": 14.9875
+  },
+  "parameters": {
+    "total": 2470738,
+    "trainable": 2469714,
+    "primary_memory": 592896,
+    "primary_conditional_compute": 1778688,
+    "primary_sparse_total": 2371584,
+    "memory_fraction": 0.25,
+    "compute_fraction": 0.75,
+    "exact_25_75": true
+  }
+}
+
