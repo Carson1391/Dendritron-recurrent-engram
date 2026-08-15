@@ -18,6 +18,15 @@ D-065 extensions over the original D-063 schema:
     computation graph.
   - delta_matrix() is the canonical procedural-SVD input; h_matrix()
     remains a diagnostic view.
+
+D-066 correction:
+  - A trajectory is identified by the ordered pair (task_id, trajectory_id).
+    Per-trajectory counters, filtering, listing, and uniqueness use that
+    pair so different tasks may safely reuse local names such as traj-001.
+  - The canonical verified procedural-SVD path requires explicit task_id,
+    trajectory_id, and structured success_evidence.  Compatibility defaults
+    (bare success= bool, default task/trajectory IDs) are tagged as legacy
+    input and excluded from the canonical SVD entry point.
 """
 
 from __future__ import annotations
@@ -67,7 +76,27 @@ class SuccessEvidence:
 
 
 # ---------------------------------------------------------------------------
-# Transition record (D-063 + D-065)
+# Legacy tag (D-066)
+# ---------------------------------------------------------------------------
+
+# Sentinel values that mark compatibility-default inputs as legacy.
+# The canonical procedural-SVD path rejects records carrying these tags.
+_LEGACY_TASK_ID = "__legacy_default_task__"
+_LEGACY_TRAJECTORY_ID = "__legacy_default_trajectory__"
+
+
+def _is_legacy_record(record: TransitionRecord) -> bool:
+    """Check whether a record was created with legacy compatibility defaults."""
+    return (
+        record.task_id == _LEGACY_TASK_ID
+        or record.trajectory_id == _LEGACY_TRAJECTORY_ID
+        or record.success_evidence.reason == "backward-compatible boolean verdict"
+        or record.success_evidence.reason == "default success"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Transition record (D-063 + D-065 + D-066)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -85,7 +114,8 @@ class TransitionRecord:
         block_index:      physical block index (0 or 1).
         round_index:      recurrent round index (0-based).
         success_evidence: structured payload authorizing the success verdict.
-        ordering:         int, sequence number scoped within each trajectory.
+        ordering:         int, sequence number scoped within each trajectory
+                          identified by the pair (task_id, trajectory_id).
     """
 
     h_t: Tensor
@@ -105,6 +135,11 @@ class TransitionRecord:
     def success(self) -> bool:
         """Derived from success_evidence.verdict — not stored independently."""
         return self.success_evidence.success
+
+    @property
+    def trajectory_key(self) -> tuple[str, str]:
+        """The (task_id, trajectory_id) pair that uniquely identifies this trajectory."""
+        return (self.task_id, self.trajectory_id)
 
     # --- Validation ---
 
@@ -142,11 +177,23 @@ class TransitionRecord:
 class TransitionRecordBuilder:
     """Collects per-visit hidden states and emits verified transition records.
 
-    Ordering is scoped per trajectory: each unique trajectory_id maintains
-    its own monotonic counter.  All tensor snapshots are detached clones
-    that release the runtime computation graph.
+    Ordering is scoped per trajectory identified by the pair
+    (task_id, trajectory_id) (D-066).  Each unique pair maintains its own
+    monotonic counter.  All tensor snapshots are detached clones that
+    release the runtime computation graph.
 
-    Usage:
+    Two usage modes:
+
+    **Canonical (D-066):** explicit task_id, trajectory_id, and
+    structured success_evidence.  Use ``canonical_delta_matrix()`` to
+    obtain the procedural-SVD input; it rejects legacy records.
+
+    **Legacy (backward-compatible):** bare ``success=True/False`` with
+    default task/trajectory IDs.  These records are tagged as legacy and
+    excluded from the canonical SVD path.  Use ``build()`` and
+    ``delta_matrix()`` for backward-compatible access.
+
+    Usage (canonical):
         builder = TransitionRecordBuilder()
         builder.add_visit(
             h_before, h_after,
@@ -157,22 +204,21 @@ class TransitionRecordBuilder:
                 metrics={"loss": 0.01},
             ),
         )
-        records = builder.build()
-        delta_matrix = builder.delta_matrix()  # [N, D] for SVD
+        delta_matrix = builder.canonical_delta_matrix()  # [N, D] for SVD
     """
 
     def __init__(self) -> None:
         self._records: list[TransitionRecord] = []
-        # Per-trajectory ordering counters (D-065: scoped within trajectory)
-        self._trajectory_counters: dict[str, int] = {}
+        # Per-trajectory ordering counters keyed by (task_id, trajectory_id) (D-066)
+        self._trajectory_counters: dict[tuple[str, str], int] = {}
 
     def add_visit(
         self,
         h_t: Tensor,
         h_next: Tensor,
         *,
-        task_id: str = "default",
-        trajectory_id: str = "default",
+        task_id: str = _LEGACY_TASK_ID,
+        trajectory_id: str = _LEGACY_TRAJECTORY_ID,
         skill_ids: Sequence[int] = (),
         block_index: int = 0,
         round_index: int = 0,
@@ -188,17 +234,20 @@ class TransitionRecordBuilder:
         Args:
             h_t:              [D] pre-transition hidden state.
             h_next:           [D] post-transition hidden state.
-            task_id:          Task identifier.
+            task_id:          Task identifier.  Defaults to legacy sentinel.
             trajectory_id:    Trajectory identifier within the task.
+                              Defaults to legacy sentinel.
             skill_ids:        Active skill slot indices; may be empty
                               during initial skill discovery.
             block_index:      Physical block index (0 or 1).
             round_index:      Recurrent round index (0-based).
-            success_evidence: Structured evidence payload.  If None and
-                              success is provided, a minimal SuccessEvidence
-                              is constructed for backward compatibility.
+            success_evidence: Structured evidence payload (canonical D-066).
+                              If None and success is provided, a minimal
+                              SuccessEvidence is constructed and tagged
+                              as legacy.
             success:          Boolean verdict for backward compatibility.
                               Ignored if success_evidence is provided.
+                              Legacy tag is applied when this path is used.
         """
         if h_t.ndim != 1:
             raise ValueError(
@@ -210,7 +259,8 @@ class TransitionRecordBuilder:
                 f"h_t shape {tuple(h_t.shape)}"
             )
 
-        # Resolve success evidence (D-065: structured payload is primary)
+        # Resolve success evidence and determine legacy status (D-066)
+        is_legacy = False
         if success_evidence is not None:
             evidence = success_evidence
         elif success is not None:
@@ -218,12 +268,23 @@ class TransitionRecordBuilder:
                 verdict=bool(success),
                 reason="backward-compatible boolean verdict",
             )
+            is_legacy = True
         else:
             evidence = SuccessEvidence(verdict=True, reason="default success")
+            is_legacy = True
 
-        # Per-trajectory ordering (D-065: scoped within trajectory)
-        ordering = self._trajectory_counters.get(trajectory_id, 0)
-        self._trajectory_counters[trajectory_id] = ordering + 1
+        # Tag legacy task/trajectory IDs (D-066)
+        effective_task_id = task_id
+        effective_trajectory_id = trajectory_id
+        if is_legacy and task_id == _LEGACY_TASK_ID:
+            effective_task_id = _LEGACY_TASK_ID
+        if is_legacy and trajectory_id == _LEGACY_TRAJECTORY_ID:
+            effective_trajectory_id = _LEGACY_TRAJECTORY_ID
+
+        # Per-trajectory ordering keyed by (task_id, trajectory_id) pair (D-066)
+        pair_key = (effective_task_id, effective_trajectory_id)
+        ordering = self._trajectory_counters.get(pair_key, 0)
+        self._trajectory_counters[pair_key] = ordering + 1
 
         # Detached clones release the runtime computation graph (D-065)
         delta = (h_next - h_t).detach().clone()
@@ -231,8 +292,8 @@ class TransitionRecordBuilder:
             h_t=h_t.detach().clone(),
             h_next=h_next.detach().clone(),
             delta_h=delta,
-            task_id=str(task_id),
-            trajectory_id=str(trajectory_id),
+            task_id=effective_task_id,
+            trajectory_id=effective_trajectory_id,
             skill_ids=tuple(int(s) for s in skill_ids),
             block_index=int(block_index),
             round_index=int(round_index),
@@ -241,6 +302,10 @@ class TransitionRecordBuilder:
         )
         self._records.append(record)
         return record
+
+    # -----------------------------------------------------------------------
+    # Backward-compatible build / matrix access (includes legacy records)
+    # -----------------------------------------------------------------------
 
     def build(
         self,
@@ -251,6 +316,9 @@ class TransitionRecordBuilder:
     ) -> list[TransitionRecord]:
         """Return records, optionally filtering by verification, task, or trajectory.
 
+        When both task_id and trajectory_id are provided, filtering uses
+        the exact (task_id, trajectory_id) pair (D-066).
+
         Args:
             verified_only: If True, return only records with success=True.
             task_id:        If provided, filter to this task.
@@ -259,9 +327,13 @@ class TransitionRecordBuilder:
         records = list(self._records)
         if verified_only:
             records = [r for r in records if r.success]
-        if task_id is not None:
+        if task_id is not None and trajectory_id is not None:
+            # D-066: exact pair filtering
+            pair = (task_id, trajectory_id)
+            records = [r for r in records if r.trajectory_key == pair]
+        elif task_id is not None:
             records = [r for r in records if r.task_id == task_id]
-        if trajectory_id is not None:
+        elif trajectory_id is not None:
             records = [r for r in records if r.trajectory_id == trajectory_id]
         return records
 
@@ -274,9 +346,10 @@ class TransitionRecordBuilder:
     ) -> Tensor:
         """Stack delta vectors into a [N, D] matrix for procedural SVD.
 
-        This is the canonical procedural-SVD input (D-065).  Only verified
-        records contribute.  Returns an empty [0, D] tensor if no records
-        pass the filter.
+        Backward-compatible access (includes legacy records).  For the
+        canonical procedural-SVD path, use ``canonical_delta_matrix()``.
+
+        Returns an empty [0, D] tensor if no records pass the filter.
         """
         records = self.build(
             verified_only=verified_only,
@@ -299,7 +372,7 @@ class TransitionRecordBuilder:
         """Stack pre-transition h_t vectors into a [N, D] diagnostic matrix.
 
         This is a diagnostic view only (D-065).  Procedural SVD consumes
-        delta_matrix(), not h_matrix().
+        delta_matrix() or canonical_delta_matrix(), not h_matrix().
         """
         records = self.build(
             verified_only=verified_only,
@@ -312,20 +385,108 @@ class TransitionRecordBuilder:
             return torch.zeros(0, 0)
         return torch.stack([r.h_t for r in records], dim=0)
 
+    # -----------------------------------------------------------------------
+    # Canonical procedural-SVD path (D-066: explicit provenance only)
+    # -----------------------------------------------------------------------
+
+    def canonical_delta_matrix(
+        self,
+        *,
+        task_id: str | None = None,
+        trajectory_id: str | None = None,
+    ) -> Tensor:
+        """Canonical procedural-SVD input (D-066).
+
+        Returns a [N, D] matrix of verified delta_h vectors from records
+        that carry explicit task_id, trajectory_id, and structured
+        success_evidence.  Legacy records (default IDs or bare boolean
+        success) are excluded.
+
+        When both task_id and trajectory_id are provided, filtering uses
+        the exact (task_id, trajectory_id) pair.
+        """
+        records = [
+            r for r in self._records
+            if r.success and not _is_legacy_record(r)
+        ]
+        if task_id is not None and trajectory_id is not None:
+            pair = (task_id, trajectory_id)
+            records = [r for r in records if r.trajectory_key == pair]
+        elif task_id is not None:
+            records = [r for r in records if r.task_id == task_id]
+        elif trajectory_id is not None:
+            records = [r for r in records if r.trajectory_id == trajectory_id]
+
+        if not records:
+            if self._records:
+                return torch.zeros(0, self._records[0].h_t.shape[0])
+            return torch.zeros(0, 0)
+        return torch.stack([r.delta_h for r in records], dim=0)
+
+    def canonical_records(
+        self,
+        *,
+        task_id: str | None = None,
+        trajectory_id: str | None = None,
+    ) -> list[TransitionRecord]:
+        """Return verified records with explicit provenance (D-066).
+
+        Excludes legacy records.  When both task_id and trajectory_id
+        are provided, filtering uses the exact pair.
+        """
+        records = [
+            r for r in self._records
+            if r.success and not _is_legacy_record(r)
+        ]
+        if task_id is not None and trajectory_id is not None:
+            pair = (task_id, trajectory_id)
+            records = [r for r in records if r.trajectory_key == pair]
+        elif task_id is not None:
+            records = [r for r in records if r.task_id == task_id]
+        elif trajectory_id is not None:
+            records = [r for r in records if r.trajectory_id == trajectory_id]
+        return records
+
+    # -----------------------------------------------------------------------
+    # Listing methods (D-066: pair-keyed)
+    # -----------------------------------------------------------------------
+
+    def trajectory_keys(self) -> list[tuple[str, str]]:
+        """Return distinct (task_id, trajectory_id) pairs that have at least one record."""
+        return list(dict.fromkeys(r.trajectory_key for r in self._records))
+
     def trajectories(self) -> list[str]:
-        """Return distinct trajectory_ids that have at least one record."""
+        """Return distinct trajectory_ids that have at least one record.
+
+        Note: this may contain duplicates across tasks.  Use
+        ``trajectory_keys()`` for unique pair identification (D-066).
+        """
         return list(dict.fromkeys(r.trajectory_id for r in self._records))
 
     def tasks(self) -> list[str]:
         """Return distinct task_ids that have at least one record."""
         return list(dict.fromkeys(r.task_id for r in self._records))
 
+    # -----------------------------------------------------------------------
+    # Counters
+    # -----------------------------------------------------------------------
+
     @property
     def count(self) -> int:
-        """Total number of records (including unverified)."""
+        """Total number of records (including unverified and legacy)."""
         return len(self._records)
 
     @property
     def verified_count(self) -> int:
         """Number of verified (success=True) records."""
         return sum(1 for r in self._records if r.success)
+
+    @property
+    def canonical_count(self) -> int:
+        """Number of verified records with explicit provenance (non-legacy)."""
+        return sum(1 for r in self._records if r.success and not _is_legacy_record(r))
+
+    @property
+    def legacy_count(self) -> int:
+        """Number of records tagged as legacy compatibility input."""
+        return sum(1 for r in self._records if _is_legacy_record(r))

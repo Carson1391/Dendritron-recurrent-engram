@@ -687,5 +687,384 @@ class D065RecordProvenanceTests(unittest.TestCase):
         self.assertEqual(tr2_delta.shape, (3, dim))
 
 
+@unittest.skipUnless(TORCH_AVAILABLE, "PyTorch executes on the training host")
+class D066PairKeyProvenanceTests(unittest.TestCase):
+    """D-066: Trajectory identity by (task_id, trajectory_id) pair.
+
+    Two tasks using the same trajectory_id (e.g. traj-001) must get
+    independent ordering counters, independent filtering, and independent
+    listing.  Legacy compatibility inputs are tagged and excluded from
+    the canonical procedural-SVD path.
+    """
+
+    def setUp(self) -> None:
+        import torch
+
+        torch.manual_seed(256)
+
+    def test_two_tasks_same_traj_id_each_begin_at_ordering_zero(self) -> None:
+        """task-A/traj-001 and task-B/traj-001 must each start at ordering 0."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(16)
+        ev = SuccessEvidence(verdict=True, reason="ok")
+
+        # task-A / traj-001: 3 visits
+        for _ in range(3):
+            builder.add_visit(
+                h, h + 0.1, task_id="task-A", trajectory_id="traj-001",
+                success_evidence=ev,
+            )
+
+        # task-B / traj-001: 2 visits
+        for _ in range(2):
+            builder.add_visit(
+                h, h + 0.1, task_id="task-B", trajectory_id="traj-001",
+                success_evidence=ev,
+            )
+
+        records_a = builder.build(task_id="task-A", trajectory_id="traj-001")
+        records_b = builder.build(task_id="task-B", trajectory_id="traj-001")
+
+        orderings_a = [r.ordering for r in records_a]
+        orderings_b = [r.ordering for r in records_b]
+
+        self.assertEqual(orderings_a, [0, 1, 2])
+        self.assertEqual(orderings_b, [0, 1])
+
+    def test_pair_key_filtering_is_exact(self) -> None:
+        """build() with both task_id and trajectory_id must filter by the pair."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+        ev = SuccessEvidence(verdict=True, reason="ok")
+
+        builder.add_visit(h, h, task_id="A", trajectory_id="tr1", success_evidence=ev)
+        builder.add_visit(h, h, task_id="A", trajectory_id="tr2", success_evidence=ev)
+        builder.add_visit(h, h, task_id="B", trajectory_id="tr1", success_evidence=ev)
+        builder.add_visit(h, h, task_id="B", trajectory_id="tr2", success_evidence=ev)
+
+        # Exact pair (A, tr1) -> 1 record
+        a_tr1 = builder.build(task_id="A", trajectory_id="tr1")
+        self.assertEqual(len(a_tr1), 1)
+        self.assertEqual(a_tr1[0].task_id, "A")
+        self.assertEqual(a_tr1[0].trajectory_id, "tr1")
+
+        # Exact pair (B, tr1) -> 1 record (different from A/tr1)
+        b_tr1 = builder.build(task_id="B", trajectory_id="tr1")
+        self.assertEqual(len(b_tr1), 1)
+        self.assertEqual(b_tr1[0].task_id, "B")
+
+        # Just task_id A -> 2 records
+        a_all = builder.build(task_id="A")
+        self.assertEqual(len(a_all), 2)
+
+        # Just trajectory_id tr1 -> 2 records (from A and B)
+        tr1_all = builder.build(trajectory_id="tr1")
+        self.assertEqual(len(tr1_all), 2)
+
+    def test_trajectory_key_property(self) -> None:
+        """TransitionRecord.trajectory_key must return (task_id, trajectory_id)."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+        record = builder.add_visit(
+            h, h + 0.1,
+            task_id="task-X",
+            trajectory_id="traj-Y",
+            success_evidence=SuccessEvidence(verdict=True, reason="ok"),
+        )
+
+        self.assertEqual(record.trajectory_key, ("task-X", "traj-Y"))
+
+    def test_trajectory_keys_listing_returns_pairs(self) -> None:
+        """trajectory_keys() must return distinct (task_id, trajectory_id) pairs."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+        ev = SuccessEvidence(verdict=True, reason="ok")
+
+        builder.add_visit(h, h, task_id="A", trajectory_id="tr1", success_evidence=ev)
+        builder.add_visit(h, h, task_id="A", trajectory_id="tr2", success_evidence=ev)
+        builder.add_visit(h, h, task_id="B", trajectory_id="tr1", success_evidence=ev)
+
+        keys = builder.trajectory_keys()
+        self.assertEqual(keys, [("A", "tr1"), ("A", "tr2"), ("B", "tr1")])
+
+    def test_trajectories_listing_may_contain_duplicates_across_tasks(self) -> None:
+        """trajectories() returns trajectory_ids only — may duplicate across tasks."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+        ev = SuccessEvidence(verdict=True, reason="ok")
+
+        builder.add_visit(h, h, task_id="A", trajectory_id="tr1", success_evidence=ev)
+        builder.add_visit(h, h, task_id="B", trajectory_id="tr1", success_evidence=ev)
+
+        # trajectories() returns ["tr1"] — only one unique trajectory_id
+        self.assertEqual(builder.trajectories(), ["tr1"])
+        # But trajectory_keys() returns two distinct pairs
+        self.assertEqual(builder.trajectory_keys(), [("A", "tr1"), ("B", "tr1")])
+
+    def test_legacy_records_excluded_from_canonical_delta_matrix(self) -> None:
+        """canonical_delta_matrix must exclude legacy compatibility records."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(32)
+
+        # Legacy: bare success= without explicit task/trajectory/evidence
+        builder.add_visit(h, h + 0.1, success=True)
+        builder.add_visit(h, h + 0.2, success=False)
+
+        # Canonical: explicit task, trajectory, structured evidence
+        builder.add_visit(
+            h, h + 0.3,
+            task_id="task-1", trajectory_id="traj-1",
+            success_evidence=SuccessEvidence(verdict=True, reason="ok"),
+        )
+        builder.add_visit(
+            h, h + 0.4,
+            task_id="task-1", trajectory_id="traj-1",
+            success_evidence=SuccessEvidence(verdict=False, reason="bad"),
+        )
+        builder.add_visit(
+            h, h + 0.5,
+            task_id="task-1", trajectory_id="traj-1",
+            success_evidence=SuccessEvidence(verdict=True, reason="ok"),
+        )
+
+        # Canonical: only 2 verified non-legacy records
+        canon = builder.canonical_delta_matrix()
+        self.assertEqual(canon.shape, (2, 32))
+
+        # Backward-compatible delta_matrix includes legacy
+        all_verified = builder.delta_matrix(verified_only=True)
+        # 1 legacy success + 2 canonical success = 3
+        self.assertEqual(all_verified.shape, (3, 32))
+
+    def test_canonical_delta_matrix_filters_by_pair(self) -> None:
+        """canonical_delta_matrix with task_id + trajectory_id filters by pair."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(16)
+        ev = SuccessEvidence(verdict=True, reason="ok")
+
+        for _ in range(2):
+            builder.add_visit(h, h + 0.1, task_id="A", trajectory_id="tr1", success_evidence=ev)
+        for _ in range(3):
+            builder.add_visit(h, h + 0.1, task_id="B", trajectory_id="tr1", success_evidence=ev)
+
+        # Both tasks use "tr1" — pair filter must distinguish them
+        a_tr1 = builder.canonical_delta_matrix(task_id="A", trajectory_id="tr1")
+        self.assertEqual(a_tr1.shape, (2, 16))
+
+        b_tr1 = builder.canonical_delta_matrix(task_id="B", trajectory_id="tr1")
+        self.assertEqual(b_tr1.shape, (3, 16))
+
+    def test_canonical_records_excludes_legacy(self) -> None:
+        """canonical_records must return only non-legacy verified records."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+
+        builder.add_visit(h, h, success=True)  # legacy
+        builder.add_visit(
+            h, h,
+            task_id="t", trajectory_id="tr",
+            success_evidence=SuccessEvidence(verdict=True, reason="ok"),
+        )  # canonical
+
+        canon = builder.canonical_records()
+        self.assertEqual(len(canon), 1)
+        self.assertEqual(canon[0].task_id, "t")
+        self.assertEqual(canon[0].trajectory_id, "tr")
+
+    def test_legacy_count_property(self) -> None:
+        """legacy_count must report the number of legacy records."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+
+        builder.add_visit(h, h, success=True)  # legacy
+        builder.add_visit(h, h, success=False)  # legacy
+        builder.add_visit(
+            h, h,
+            task_id="t", trajectory_id="tr",
+            success_evidence=SuccessEvidence(verdict=True, reason="ok"),
+        )  # canonical
+
+        self.assertEqual(builder.legacy_count, 2)
+        self.assertEqual(builder.canonical_count, 1)
+        self.assertEqual(builder.count, 3)
+
+    def test_canonical_count_excludes_legacy_and_unverified(self) -> None:
+        """canonical_count must count only verified non-legacy records."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+
+        # Canonical but failed
+        builder.add_visit(
+            h, h,
+            task_id="t", trajectory_id="tr",
+            success_evidence=SuccessEvidence(verdict=False, reason="bad"),
+        )
+        # Canonical and verified
+        builder.add_visit(
+            h, h,
+            task_id="t", trajectory_id="tr",
+            success_evidence=SuccessEvidence(verdict=True, reason="ok"),
+        )
+        # Legacy and verified
+        builder.add_visit(h, h, success=True)
+
+        self.assertEqual(builder.canonical_count, 1)
+        self.assertEqual(builder.verified_count, 2)
+        self.assertEqual(builder.legacy_count, 1)
+
+    def test_ordering_continues_correctly_after_interleaving(self) -> None:
+        """Ordering per pair must continue correctly when tasks interleave."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+        ev = SuccessEvidence(verdict=True, reason="ok")
+
+        # Interleave A/tr1 and B/tr1
+        builder.add_visit(h, h, task_id="A", trajectory_id="tr1", success_evidence=ev)
+        builder.add_visit(h, h, task_id="B", trajectory_id="tr1", success_evidence=ev)
+        builder.add_visit(h, h, task_id="A", trajectory_id="tr1", success_evidence=ev)
+        builder.add_visit(h, h, task_id="B", trajectory_id="tr1", success_evidence=ev)
+        builder.add_visit(h, h, task_id="A", trajectory_id="tr1", success_evidence=ev)
+
+        a_records = builder.build(task_id="A", trajectory_id="tr1")
+        b_records = builder.build(task_id="B", trajectory_id="tr1")
+
+        self.assertEqual([r.ordering for r in a_records], [0, 1, 2])
+        self.assertEqual([r.ordering for r in b_records], [0, 1])
+
+    def test_default_add_visit_creates_legacy_record(self) -> None:
+        """add_visit with no explicit task/trajectory/evidence creates legacy."""
+        import torch
+
+        from dendritron.transition_records import TransitionRecordBuilder
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+
+        record = builder.add_visit(h, h + 0.1)
+
+        self.assertTrue(_is_legacy(record))
+
+    def test_explicit_task_with_bare_success_is_legacy(self) -> None:
+        """add_visit with explicit task_id but bare success= is still legacy."""
+        import torch
+
+        from dendritron.transition_records import TransitionRecordBuilder
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+
+        record = builder.add_visit(
+            h, h + 0.1,
+            task_id="task-A", trajectory_id="traj-1",
+            success=True,
+        )
+
+        # Legacy because success_evidence was not explicitly provided
+        self.assertTrue(_is_legacy(record))
+
+    def test_fully_explicit_record_is_not_legacy(self) -> None:
+        """add_visit with explicit task, trajectory, and success_evidence is canonical."""
+        import torch
+
+        from dendritron.transition_records import (
+            SuccessEvidence,
+            TransitionRecordBuilder,
+        )
+
+        builder = TransitionRecordBuilder()
+        h = torch.randn(8)
+
+        record = builder.add_visit(
+            h, h + 0.1,
+            task_id="task-A", trajectory_id="traj-1",
+            success_evidence=SuccessEvidence(verdict=True, reason="ok"),
+        )
+
+        self.assertFalse(_is_legacy(record))
+
+
+def _is_legacy(record) -> bool:
+    """Helper: check if a record is tagged as legacy."""
+    from dendritron.transition_records import _is_legacy_record
+    return _is_legacy_record(record)
+
+
 if __name__ == "__main__":
     unittest.main()
