@@ -106,11 +106,11 @@ class ExpertGraph:
             raise ValueError("limit must be positive")
         skills = frozenset(int(value) for value in active_skill_ids)
         concepts = frozenset(str(value) for value in active_concept_ids)
+        # D-083: candidates come from skill_to_experts only.
+        # concept_ids remain as ranking metadata, not candidate gathering.
         candidate_ids: set[str] = set()
         for skill_id in skills:
             candidate_ids.update(self.skill_to_experts.get(skill_id, ()))
-        for concept_id in concepts:
-            candidate_ids.update(self.concept_to_experts.get(concept_id, ()))
 
         candidates = []
         for expert_id in candidate_ids:

@@ -93,6 +93,36 @@ class DendritronLM(nn.Module):
             config.model_width,
             epsilon=config.geometric_epsilon,
         )
+        # Frozen definition bank: [N_senses, 2048] layer-2 donor vectors.
+        # None until load_definition_bank attaches the frozen tensor.
+        self.register_buffer("definition_bank", None, persistent=True)
+
+    @torch.no_grad()
+    def load_definition_bank(self, values: Tensor) -> None:
+        """Attach the frozen layer-2 dictionary bank as a non-trainable buffer.
+
+        The bank holds one 2048D bfloat16 row per sense (1,532,746 in
+        production).  LNGram addresses become handles that index_select
+        into this bank during the recurrent loop.  No disk I/O at runtime.
+        """
+
+        if values.ndim != 2 or values.shape[-1] != self.config.memory_width:
+            raise ValueError(
+                f"Definition bank must be [N_senses, {self.config.memory_width}], "
+                f"found {tuple(values.shape)}"
+            )
+        if self.definition_bank is not None:
+            raise RuntimeError("Definition bank is already loaded")
+        bank = values.to(
+            device=next(self.parameters()).device,
+            dtype=torch.float32,
+        )
+        self.definition_bank = bank
+        self.memory_fusion.attach_definition_bank(bank)
+        # Propagate frozen bank to DefinitionLnGram modules in the recurrent core
+        if self.core.definition_lngram is not None:
+            for module in self.core.definition_lngram:
+                module.attach_definition_bank(bank)
 
     @torch.no_grad()
     def load_token_embeddings(self, values: Tensor) -> None:

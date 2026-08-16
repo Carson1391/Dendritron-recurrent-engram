@@ -33,6 +33,7 @@ class MemoryPayloads:
     definitions: Tensor | None = None
     definition_mask: Tensor | None = None
     definition_sense_rows: Tensor | None = None
+    definition_evidence: Tensor | None = None
     hash_addresses: Mapping[int, Tensor] | None = None
 
     def to(self, device: torch.device | str) -> "MemoryPayloads":
@@ -46,6 +47,7 @@ class MemoryPayloads:
             definitions=move(self.definitions),
             definition_mask=move(self.definition_mask),
             definition_sense_rows=move(self.definition_sense_rows),
+            definition_evidence=move(self.definition_evidence),
             hash_addresses=(
                 None
                 if self.hash_addresses is None
@@ -66,6 +68,7 @@ class MemoryFusionStats:
     definition_weights: Tensor | None
     definition_squared_distances: Tensor | None
     definition_sense_rows: Tensor | None
+    definition_signed_coeff: Tensor | None
     active_definition_count: Tensor | None
 
 
@@ -166,6 +169,11 @@ class SparseMemoryFusion(nn.Module):
             heads=hash_heads,
             memory_width=hash_memory_width,
         )
+        # Frozen definition bank: [N_senses, memory_width] layer-2 donor
+        # vectors.  None until attach_definition_bank is called by the
+        # model's load_definition_bank.  When attached, definition_sense_rows
+        # in MemoryPayloads index directly into this bank — no disk I/O.
+        self.definition_bank: Tensor | None = None
 
         # Index 0 is physical block 1; index 1 is physical block 2.  Near-zero
         # values preserve a quiet start while keeping every path trainable.
@@ -175,6 +183,21 @@ class SparseMemoryFusion(nn.Module):
         self.hash_gates = nn.Parameter(torch.full((2,), 1e-3))
         self.initial_phrase8_gate = nn.Parameter(torch.tensor(1e-3))
         self.initial_hash_gate = nn.Parameter(torch.tensor(1e-3))
+
+    @torch.no_grad()
+    def attach_definition_bank(self, bank: Tensor) -> None:
+        """Receive the frozen [N_senses, memory_width] bank from the model.
+
+        After this call, _definition_field can gather vectors by sense-row
+        index instead of requiring pre-materialized definition tensors.
+        """
+
+        if bank.ndim != 2 or bank.shape[-1] != self.memory_width:
+            raise ValueError(
+                f"Definition bank must be [N_senses, {self.memory_width}], "
+                f"found {tuple(bank.shape)}"
+            )
+        self.definition_bank = bank
 
     def _validate_phrase(self, values: Tensor, hidden: Tensor) -> None:
         if values.shape != (*hidden.shape[:2], self.memory_width):
@@ -206,9 +229,38 @@ class SparseMemoryFusion(nn.Module):
         values: Tensor | None,
         mask: Tensor | None,
         sense_rows: Tensor | None,
-    ) -> tuple[Tensor | None, Tensor | None, Tensor | None, Tensor | None]:
+        evidence: Tensor | None = None,
+    ) -> tuple[Tensor | None, Tensor | None, Tensor | None, Tensor | None, Tensor | None]:
+        # Bank-gather path: when the frozen definition bank is attached and
+        # sense_rows + mask are provided, index_select directly from the
+        # loaded [N_senses, memory_width] tensor.  No disk I/O, no
+        # pre-materialized definition tensor needed.
+        if values is None and self.definition_bank is not None:
+            if sense_rows is None or mask is None:
+                return None, None, None, None, None
+            sense_rows = sense_rows.to(device=hidden.device, dtype=torch.long)
+            mask = mask.to(device=hidden.device, dtype=torch.bool)
+            if sense_rows.shape != mask.shape:
+                raise ValueError("definition_sense_rows and definition_mask must share shape")
+            if sense_rows.ndim != 3 or sense_rows.shape[:2] != hidden.shape[:2]:
+                raise ValueError("definition_sense_rows must be [B,T,S]")
+            bank = self.definition_bank
+            # Clamp invalid rows to 0, zero them out via mask after gather
+            valid_rows = sense_rows >= 0
+            safe_rows = sense_rows.clamp(min=0, max=bank.shape[0] - 1)
+            gathered = bank.index_select(0, safe_rows.reshape(-1)).view(
+                *sense_rows.shape, self.memory_width
+            )
+            # Apply mask: zero out invalid sense slots and propagate the
+            # effective mask so downstream weight computation excludes them
+            effective_mask = mask & valid_rows
+            gathered = gathered * effective_mask.unsqueeze(-1)
+            values = gathered
+            mask = effective_mask
+            sense_rows = sense_rows.masked_fill(~effective_mask, -1)
+
         if values is None:
-            return None, None, None, None
+            return None, None, None, None, None
         if values.ndim != 4 or values.shape[:2] != hidden.shape[:2]:
             raise ValueError("Definitions must be [B,T,S,memory_width]")
         if values.shape[-1] != self.memory_width:
@@ -223,23 +275,51 @@ class SparseMemoryFusion(nn.Module):
                 raise ValueError("definition_sense_rows must be [B,T,S]")
             sense_rows = sense_rows.to(device=values.device, dtype=torch.long)
 
+        # Evidence (y-mass): defaults to uniform 1.0 for valid entries when
+        # not explicitly provided.  Positive evidence attracts, deficit
+        # relative to distance mass repels — this is the signed HarMax (y-p)
+        # contraction field.
+        if evidence is None:
+            evidence = torch.ones(values.shape[:-1], device=values.device, dtype=values.dtype)
+        else:
+            evidence = evidence.to(device=values.device, dtype=values.dtype)
+            if evidence.shape != values.shape[:-1]:
+                raise ValueError("definition_evidence must be [B,T,S]")
+
         anchors = self.joint_transfer.definitions_to_joint(values)
         query = self.joint_transfer.source_to_joint(hidden, "live")
-        displacement = anchors - query.unsqueeze(-2)
+        displacement = anchors - query.unsqueeze(-2)  # [B,T,S,D]
         squared_distances = (
             displacement.square().mean(dim=-1) + self.epsilon**2
-        )
-        inverse_distance_mass = squared_distances.pow(
+        )  # [B,T,S]
+
+        # Distance mass (p): inverse-distance weighting
+        inverse_distance = squared_distances.pow(
             -0.5 * self.definition_harmonic_exponent
         )
-        inverse_distance_mass = inverse_distance_mass * mask
-        denominator = inverse_distance_mass.sum(dim=-1, keepdim=True)
-        weights = inverse_distance_mass / (denominator + self.epsilon)
+        inverse_distance = inverse_distance * mask.float()
+        dist_sum = inverse_distance.sum(dim=-1, keepdim=True) + self.epsilon
+        distance_mass = inverse_distance / dist_sum  # p
+
+        # Target mass (y): evidence normalized over valid entries
+        positive_evidence = evidence.clamp_min(0.0) * mask.float()
+        ev_sum = positive_evidence.sum(dim=-1, keepdim=True) + self.epsilon
+        target_mass = positive_evidence / ev_sum  # y
+
+        # Signed coefficient: y - p (attraction where y > p, repulsion where y < p)
+        signed_coeff = target_mass - distance_mass  # [B,T,S]
+
+        # Signed HarMax movement: h * sum(signed_coeff * displacement / squared_distance)
         active = mask.any(dim=-1)
-        centroid = (weights.unsqueeze(-1) * anchors).sum(dim=-2)
-        movement = (centroid - query) * active.unsqueeze(-1)
+        movement = self.definition_harmonic_exponent * (
+            signed_coeff.unsqueeze(-1)
+            * displacement
+            / squared_distances.unsqueeze(-1)
+        ).sum(dim=-2)  # [B,T,D]
+        movement = movement * active.unsqueeze(-1)
         update = self.joint_transfer.movement_to_live(movement)
-        return update, weights, squared_distances, sense_rows
+        # weights returned for stats: distance_mass is the natural successor
+        return update, distance_mass, squared_distances, sense_rows, signed_coeff
 
     def initial_update(
         self,
@@ -284,6 +364,7 @@ class SparseMemoryFusion(nn.Module):
                     definition_weights=None,
                     definition_squared_distances=None,
                     definition_sense_rows=None,
+                    definition_signed_coeff=None,
                     active_definition_count=None,
                 )
             return update
@@ -310,11 +391,14 @@ class SparseMemoryFusion(nn.Module):
                 + torch.tanh(self.phrase24_gates[block_index]) * phrase24
             )
 
-        definition_update, weights, distances, sense_rows = self._definition_field(
-            hidden,
-            payloads.definitions,
-            payloads.definition_mask,
-            payloads.definition_sense_rows,
+        definition_update, weights, distances, sense_rows, signed_coeff = (
+            self._definition_field(
+                hidden,
+                payloads.definitions,
+                payloads.definition_mask,
+                payloads.definition_sense_rows,
+                payloads.definition_evidence,
+            )
         )
         if definition_update is not None:
             update = (
@@ -341,6 +425,7 @@ class SparseMemoryFusion(nn.Module):
                 definition_weights=weights,
                 definition_squared_distances=distances,
                 definition_sense_rows=sense_rows,
+                definition_signed_coeff=signed_coeff,
                 active_definition_count=active_count,
             )
         return update

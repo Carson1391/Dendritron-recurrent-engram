@@ -42,6 +42,7 @@ class DendritronConfig:
     lngram_bits_per_route: int = 4
     lngram_orders: tuple[int, ...] = (2, 3)
     lngram_route_memory_width: int = 4
+    senses_per_address: int = 4
 
     hash_orders: tuple[int, ...] = (2, 3)
     hash_heads: int = 4
@@ -104,6 +105,8 @@ class DendritronConfig:
             raise ValueError("hash table row counts must be positive")
         if abs(self.memory_fraction - 0.25) > 1e-12:
             raise ValueError("Dendritron fixes conditional memory capacity at 25%")
+        if self.senses_per_address < 1:
+            raise ValueError("senses_per_address must be positive")
         if self.deep_loop_exponent not in {0.25, 0.5}:
             raise ValueError("deep_loop_exponent must be 0.25 or 0.5")
 

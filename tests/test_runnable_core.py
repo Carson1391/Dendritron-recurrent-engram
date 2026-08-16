@@ -157,7 +157,7 @@ class RunnableCoreTests(unittest.TestCase):
         )
         mask = torch.ones(1, 1, 3, dtype=torch.bool)
         rows = torch.tensor([[[101, 102, 103]]], dtype=torch.long)
-        update, weights, distances, returned_rows = fusion._definition_field(
+        update, weights, distances, returned_rows, signed_coeff = fusion._definition_field(
             hidden,
             definitions,
             mask,

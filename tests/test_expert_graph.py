@@ -49,5 +49,55 @@ class ExpertGraphTests(unittest.TestCase):
         self.assertIsNone(expert.coefficient_prior_id)
 
 
+    def test_concept_only_expert_not_routed_without_skill_overlap(self):
+        # D-083: concept_ids must not expand the candidate set.
+        # An expert sharing a concept but no skills with the active set
+        # must not appear in route() results.
+        expert_a = ExpertRecord(
+            expert_id="skill-expert",
+            knowledge_anchor=(0.1, 0.2),
+            task_relation="task-a",
+            skill_ids=(3, 5),
+            concept_ids=("shared-concept",),
+        )
+        expert_b = ExpertRecord(
+            expert_id="concept-only-expert",
+            knowledge_anchor=(0.3, 0.4),
+            task_relation="task-b",
+            skill_ids=(7, 9),
+            concept_ids=("shared-concept",),
+        )
+        graph = ExpertGraph()
+        graph.add(expert_a)
+        graph.add(expert_b)
+
+        routed = graph.route(
+            active_skill_ids=(3,),
+            active_concept_ids=("shared-concept",),
+        )
+        routed_ids = tuple(c.expert.expert_id for c in routed)
+        self.assertIn("skill-expert", routed_ids)
+        self.assertNotIn("concept-only-expert", routed_ids)
+
+    def test_empty_skill_ids_returns_no_candidates(self):
+        # D-083: with no active skills, route() returns nothing even if
+        # concept_ids match.
+        expert = ExpertRecord(
+            expert_id="lonely-expert",
+            knowledge_anchor=(0.5,),
+            task_relation="solo",
+            skill_ids=(1,),
+            concept_ids=("some-concept",),
+        )
+        graph = ExpertGraph()
+        graph.add(expert)
+
+        routed = graph.route(
+            active_skill_ids=(),
+            active_concept_ids=("some-concept",),
+        )
+        self.assertEqual(routed, ())
+
+
 if __name__ == "__main__":
     unittest.main()

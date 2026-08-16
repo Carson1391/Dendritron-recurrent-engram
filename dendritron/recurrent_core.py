@@ -18,6 +18,7 @@ from .geometric_attention import (
     HarMaxContractionStats,
     RMSNorm,
 )
+from .definition_lngram import DefinitionLnGram, DefinitionLnGramStats
 from .lngram import LNGramMemory, LNGramStats
 from .memory_fusion import MemoryFusionStats, MemoryPayloads, SparseMemoryFusion
 from .working_adapter import BranchContractionStats, SkillExpertStats, SkillExpertSystem
@@ -33,8 +34,9 @@ class BlockVisitStats:
     harmax: HarMaxContractionStats
     memory: MemoryFusionStats
     lngram: LNGramStats | None
-    branch_contraction: BranchContractionStats | None
     skill_expert: SkillExpertStats
+    definition_lngram: DefinitionLnGramStats | None = None
+    branch_contraction: BranchContractionStats | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,28 @@ class TwoBlockRecurrentCore(nn.Module):
             if config.use_lngram
             else None
         )
+        # Definition LNGram: routes in joint space, gathers from frozen bank,
+        # applies signed HarMax (y-p).  Requires attach_definition_bank
+        # before forward.  When the bank is attached, this replaces the
+        # learned-table LNGram in the forward pass.
+        self.definition_lngram = (
+            nn.ModuleList(
+                [
+                    DefinitionLnGram(
+                        config.model_width,
+                        config.memory_width,
+                        bits_per_route=config.lngram_bits_per_route,
+                        orders=config.lngram_orders,
+                        senses_per_address=config.senses_per_address,
+                        harmonic_exponent=config.harmax_exponent,
+                        epsilon=config.geometric_epsilon,
+                    )
+                    for _ in range(2)
+                ]
+            )
+            if config.use_lngram
+            else None
+        )
         self.skill_expert = SkillExpertSystem(
             config.model_width,
             max_skill_slots=config.max_skill_slots,
@@ -172,7 +196,23 @@ class TwoBlockRecurrentCore(nn.Module):
                     block_index=block_index,
                     return_stats=True,
                 )
-                if self.lngram is None:
+                # Use DefinitionLnGram when the frozen bank is attached;
+                # fall back to learned-table LNGram otherwise.
+                definition_lngram_stats = None
+                if (
+                    self.definition_lngram is not None
+                    and self.definition_lngram[block_index].definition_bank is not None
+                ):
+                    lngram_input = contextual_hidden + memory_update
+                    lngram_output, definition_lngram_stats = (
+                        self.definition_lngram[block_index](
+                            lngram_input,
+                            return_stats=True,
+                        )
+                    )
+                    lngram_update = lngram_output - lngram_input
+                    lngram_stats = None
+                elif self.lngram is None:
                     lngram_update = torch.zeros_like(hidden)
                     lngram_stats = None
                 else:
@@ -242,6 +282,7 @@ class TwoBlockRecurrentCore(nn.Module):
                             harmax=harmax_stats,
                             memory=memory_stats,
                             lngram=lngram_stats,
+                            definition_lngram=definition_lngram_stats,
                             branch_contraction=branch_stats,
                             skill_expert=skill_expert_stats,
                         )
