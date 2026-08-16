@@ -2,77 +2,190 @@
 
 <p align="center">
   <a href="docs/Dendritron_ARM_Technical_Architecture_Brief.pdf">
-    <img src="docs/Dendritron_ARM_Technical_Architecture_Brief_Cover.png" alt="Dendritron Recurrent Engram technical architecture brief, Revision 4.0" width="620">
+    <img src="docs/Dendritron_ARM_Technical_Architecture_Brief_Cover.png" alt="Dendritron Recurrent Engram technical architecture brief, Revision 4.1" width="620">
   </a>
 </p>
 
 <p align="center">
-  <strong><a href="docs/Dendritron_ARM_Technical_Architecture_Brief.pdf">Read the Revision 4.0 technical architecture brief</a></strong><br>
-  Sparse memory carries knowledge. Two blocks carry thought.
+  <strong><a href="docs/Dendritron_ARM_Technical_Architecture_Brief.pdf">Read the Revision 4.1 technical architecture brief</a></strong><br>
+  Address knowledge sparsely. Move thought geometrically. Reuse two blocks.
 </p>
 
-> **Project status - 16 August 2026:** punctuation-v2 phrase banks, token seeds,
-> the layer-2 definition bank, real CPU JTD fits, and the two-block reference
-> core are built or reported complete. The current development tree contains
-> 176 tests. LNGram address-to-sense population and the signed definition
-> HarMax field remain the next integration boundary.
+> **Stage 4 status — 16 August 2026:** punctuation-v2 phrase banks, token
+> seeds, the layer-2 definition bank, real CPU JTD fits, and the two-block
+> reference core are built or reported complete. The active development tree
+> reports 176 tests. LNGram address-to-sense population and definition-pool
+> evidence construction remain the current integration boundary.
 
 ## What Dendritron is
 
 Dendritron Recurrent Engram is a CPU/ARM-first recurrent language architecture
-that separates stable knowledge from changing thought:
+with two cooperating planes:
 
-- **Frozen conditional memory** stores exact phrase states and dictionary-sense
-  landmarks produced by a large offline Qwen donor.
-- **A distinct live state** carries the current problem and intermediate
-  reasoning through two repeatedly visited physical blocks.
-- **JTD, LNGram, and HarMax** align the live query, select a bounded semantic
-  neighborhood, and convert evidence into signed attraction and repulsion.
-- **Composed LoRA skills and sparse experts** provide reusable procedures and
-  expert-owned typed branches.
+- **The reasoning plane** evolves a live 2,048D state through geometric
+  attention, HarMax/Harmonic Loss, expert-owned reasoning branches, composed
+  LoRA skills, and two repeatedly visited DeepLoop blocks.
+- **The memory plane** supplies exact phrase states and bounded dictionary-sense
+  landmarks produced once by a large offline Qwen donor.
 
-The donor GPU cost is paid during offline asset construction. Production
-inference is CPU-resident. Runtime task execution keeps the core, shared basis,
-skill coefficients, private factors, experts, and router anchors frozen;
-verified updates are fitted and validated offline before they are committed.
+Memory locates relevant coordinates. The reasoning engine decides how the live
+state moves among them. Production inference remains CPU-resident; donor GPU
+work is confined to offline asset construction.
 
-## Architecture at a glance
+## One recurrent visit
 
 ```mermaid
 flowchart TD
-    A[Offline Qwen donor] --> B[Frozen phrase, definition, token, and JTD assets]
-    H[Live state h_t] --> J[JTD-aligned query u_t]
-    B --> S[Exact surface phrase and word-sense seeds]
-    J --> L[LNGram latent address]
-    L --> R[Bounded sense-row record]
-    B --> G[Frozen definition gather]
-    S --> P[Bounded HarMax pool]
-    R --> G
-    G --> P
-    P --> D[Two-block DeepLoop plus composed skills and experts]
-    D --> H
+    H[Live state h] --> J[JTD-aligned query u]
+    J --> L[LNGram address]
+    L --> G[Bounded anchors + expert branches]
+    G --> F[HarMax signed field]
+    F --> B[DeepLoop block]
+    B --> S[Composed skill + expert soma]
+    S --> H
 ```
 
-The definition-memory path is:
+The full visit contract is:
 
 ```text
 h_t
-  -> live_to_joint J_h
-  -> joint query u_t
-  -> RMSNorm(u_t) W_q
-  -> exact latent 2/3-gram address
-  -> populated bounded sense-row record
-  -> frozen layer-2 definition gather and adjacency expansion
-  -> signed HarMax (y - p) field
-  -> joint_to_live
-  -> gated residual into h_t
+  -> J_h and RMSNorm
+  -> LNGram latent 2/3-gram address
+  -> bounded definition anchors and calibrated evidence
+  -> Euclidean distance field
+  -> HarMax proximity mass p and target mass y
+  -> signed attraction / repulsion Delta u
+  -> joint_to_live movement
+  -> Block 1 expansion or Block 2 contraction
+  -> composed shared/private LoRA skill
+  -> bounded expert branches and signed expert soma
+  -> h_t for the next visit
 ```
 
-The raw LNGram address and dictionary row IDs are separate namespaces. JTD
-owns continuous alignment; LNGram owns sparse selection; the definition bank
-already occupies the canonical layer-2 joint frame.
+## Active reasoning engine
 
-## Frozen assets
+### Geometric attention and HarMax
+
+The live state is projected into the frozen layer-2 joint frame as
+`u = J_h h`. LNGram and exact surface lookup gather a bounded candidate pool;
+the current query then scores every gathered anchor `c_q` in ordinary Euclidean
+geometry:
+
+```text
+D_q     = ||u - c_q||_2^2 + lambda_p * delta_q^2 + epsilon^2
+p_q     = D_q^(-n/2) / sum_j D_j^(-n/2)
+y_q     = normalized positive supported evidence
+rho     = -sum_q y_q * log(p_q)
+Delta u = n * sum_q (y_q - p_q) * (c_q - u) / D_q
+```
+
+`gamma_q = y_q - p_q` gives every candidate a signed physical role:
+
+- `gamma_q > 0` pulls the live point toward underrepresented support.
+- `gamma_q < 0` pushes the live point away from contradictory or excess
+  proximity.
+- zero-target candidates remain in the denominator and provide contrast.
+
+HarMax is scale-invariant under uniform scaling of the completed distance
+vector. The causal displacement and epsilon terms therefore participate in the
+same normalized distance construction. The finite-center and interpretability
+results in the Harmonic Loss paper enter Dendritron as research motivation and
+evaluation hypotheses; the locked runtime contract is the signed recurrent
+field above.
+
+Implementation owner:
+[`dendritron/geometric_attention.py`](dendritron/geometric_attention.py).
+
+### Two-block DeepLoop reasoning
+
+Dendritron stores two physical blocks and reuses them for `R` rounds. Stored
+depth is `K = 2`; effective unrolled depth is `N = KR = 2R`.
+
+- **Block 1 — expansion:** preserves multiple semantic anchors and opens
+  abductive, analogical, causal, and counterfactual proposals.
+- **Block 2 — contraction:** applies deductive, causal-consistency,
+  contrastive, and counterfactual checks; opposing anchors repel and supported
+  residual falls.
+
+Each physical block has two sequential Post-RMSNorm residual sublayers:
+
+```text
+C     = Delta_HarMax-context + Delta_memory + Delta_branch-contract
+U     = RMSNorm(alpha * H_in + C)
+E     = Delta_skill-LoRA + Delta_expert-soma
+H_out = RMSNorm(alpha * U + E)
+```
+
+DeepLoop accounts for repeated visits to tied parameters. With two residual
+sublayers per block, `M = 2KR = 4R`, and the conservative aligned regime uses:
+
+```text
+alpha = sqrt(2N)
+beta  = 1 / sqrt(8N)
+stability diagnostic: M * kappa_R * (beta / alpha)^2 = O(1)
+```
+
+`kappa_R` measures alignment among repeated visits and remains part of the
+stability evidence. Implementation owner:
+[`dendritron/recurrent_core.py`](dendritron/recurrent_core.py).
+
+### Expert-owned reasoning branches
+
+An expert junction binds knowledge, task, skill, branch, prior, and success
+statistics. Each branch specification carries its operator, relation, semantic
+roles, skill mask, evidence signs, and exact anchor IDs.
+
+At each visit, the selected expert instantiates branches from the current live
+state, retrieved memory, and active skills. A branch returns:
+
+- a derivative movement;
+- a harmonic residual;
+- signed evidence;
+- an exact provenance trace.
+
+The expert soma combines branch movements with signed L1-normalized weights.
+The operator vocabulary covers deductive, causal, contrastive,
+counterfactual, abductive, and compositional/analogical reasoning.
+`skill_to_experts` defines the bounded candidate set; definition evidence ranks
+that set.
+
+Implementation owner:
+[`dendritron/expert_graph.py`](dendritron/expert_graph.py).
+
+### Procedural skill compiler
+
+Semantic alignment and procedural compilation are separate fits. Verified
+reasoning trajectories form the procedural stack:
+
+```text
+D_proc = Stack({Delta h_t, Delta o_t, vec(Delta W_t), J_t}_verified)
+D_proc = U Sigma V^T
+x      = (I - U U^T) delta
+```
+
+SVD or HOSVD supplies a candidate fitter for shared procedural modes. Retained
+rank follows measured cumulative energy, reconstruction error, task success,
+and replay preservation. Initial capacity supports up to 32 skill slots; the
+measured basis determines the populated subset.
+
+For skill `s` and block `b`, the complete adapter is:
+
+```text
+Delta W_s,b = B_b^sh diag(q_s) A_b^sh + B_s,b^priv A_s,b^priv
+```
+
+The leading shared modes define reusable skill coordinates. Orthogonal
+residual energy `x` remains attached to the selected skill's private factors
+and verified experience. Repeated coherent residuals may later enter a new
+shared-basis consolidation cycle.
+
+Implementation owners:
+[`dendritron/working_adapter.py`](dendritron/working_adapter.py) and
+[`dendritron/shared_skill_subspace.py`](dendritron/shared_skill_subspace.py).
+
+## Sparse memory plane
+
+### Frozen assets
 
 | Asset | Shape or count | Current evidence |
 |---|---:|---|
@@ -84,125 +197,44 @@ already occupies the canonical layer-2 joint frame.
 | JTD anchor triples | 32,768 bigrams + 32,768 trigrams | Layer-2 reference paired with layer-8 and layer-24 sources |
 | Real CPU JTD fit | 65,536 paired anchors per source | `J8: 21.849 -> 0.372`; `J24: 37.923 -> 0.844` |
 
-The bigram and trigram banks have independent row numbers, indexes, shards,
-and manifests. Every phrase row stores both donor depths.
+The bigram and trigram banks have independent rows, indexes, shards, and
+manifests. Every phrase row stores both donor depths.
 
-## Surface phrase memory
+### Surface phrase memory
 
-At each complete-word endpoint, the surface resolver uses longest exact match:
+At each complete-word endpoint, the resolver uses longest exact match:
 
 ```text
 exact 3-word suffix
-  -> otherwise exact 2-word suffix
-  -> otherwise trainable Hash-Engram miss path
+  -> exact 2-word suffix
+  -> trainable Hash-Engram miss path
 ```
 
 Punctuation remains in the raw Qwen stream and in Hash-Engram addressing.
 Frozen word-phrase lookup resets at punctuation or symbol boundaries while
 retaining internal apostrophes and hyphens.
 
-Phrase lookup and constituent semantic seeding coexist. Even when a bigram or
-trigram wins, every complete word keeps access to all of its dictionary sense
-rows. The phrase payload supplies narrow contextual memory; the constituent
-senses seed the broader definition neighborhood.
+Phrase lookup and constituent semantic seeding coexist. Every complete word
+keeps access to its dictionary sense rows. The phrase payload supplies narrow
+contextual memory; constituent senses seed the broader definition neighborhood.
 
-Relevant implementation owners:
-
-- [`dendritron/retrieval.py`](dendritron/retrieval.py) - longest `3 -> 2 -> 1`
-  routing and lower-order decomposition.
-- [`dendritron/jtd.py`](dendritron/jtd.py) - exact surface indexes and collision
-  verification.
-- [`dendritron/engram_store.py`](dendritron/engram_store.py) - immutable
-  row-to-shard phrase loading.
-- [`dendritron/hash_engram.py`](dendritron/hash_engram.py) - trainable miss
-  coverage.
-- [`dendritron/memory_pipeline.py`](dendritron/memory_pipeline.py) - runtime
-  payload construction.
-
-## Definition memory: JTD, LNGram, and HarMax
+### Definition memory: JTD plus LNGram
 
 The definition bank stores one immutable row per word sense. Each record keeps
 its exact source ID, definition text, ordered definition-word links, and one
 2,048D Qwen layer-2 vector.
 
-JTD aligns source views into that frozen frame:
+- JTD aligns layer-8 phrase states, layer-24 phrase states, and the evolving
+  recipient state into the frozen layer-2 reference frame.
+- LNGram derives exact latent 2/3-gram addresses from the aligned live query.
+- A populated address resolves a bounded tensor record of sense rows, masks,
+  provenance, and calibrated evidence.
+- Gather-then-compute loads only the selected frozen anchors for the current
+  recurrent visit.
 
-- definitions use the identity reference;
-- `J8` aligns layer-8 phrase memory;
-- `J24` aligns layer-24 phrase memory;
-- `J_h` aligns the evolving recipient state;
-- `joint_to_live` is an independent movement map, initialized as identity when
-  square.
-
-LNGram forms exact discrete route addresses from the JTD-aligned live query.
-A populated address resolves a bounded tensor record containing sense-row
-handles, validity masks, provenance, and calibrated evidence. The model then
-gathers only those frozen definition rows.
-
-HarMax converts the gathered pool into signed movement:
-
-```text
-d_q^2   = ||u - c_q||_2^2 + eps^2
-p_q     = d_q^-1 / sum_r d_r^-1
-Delta u = n * sum_q (y_q - p_q) * (c_q - u) / d_q^2
-```
-
-- `y_q > p_q` attracts the live query toward underrepresented support.
-- `y_q < p_q` repels it from unsupported or excess proximity.
-- zero-target competitors remain in the denominator and supply contrast.
-
-The complete bank attachment and safe gather from supplied sense rows are
-reported implemented. Two contracts govern the remaining bridge:
-
-- **O-019:** address-to-sense assignment and the hard-router training signal.
-- **O-021:** construction of target evidence `y` for the definition pool.
-
-## Two blocks carry thought
-
-Dendritron stores two physical blocks and reuses them for `R` rounds. Stored
-depth is 2; effective thought depth is `2R`.
-
-Each block has two sequential Post-RMSNorm residual sublayers:
-
-1. HarMax geometric, memory, and branch contraction.
-2. Composed skill LoRA and expert-soma computation.
-
-Block 1 is biased toward expansion: opening relations, candidates, and possible
-explanations. Block 2 is biased toward contraction: contrasting, verifying,
-and integrating candidates against memory and evidence.
-
-DeepLoop's visit-aware scaling is retained:
-
-```text
-alpha = sqrt(2N)
-beta  = 1 / sqrt(8N)
-```
-
-The expert-owned typed branch vocabulary includes deductive, causal,
-contrastive, counterfactual, abductive, and analogical operations.
-
-## Composed LoRA skills and bounded experts
-
-For skill `s` and block `b`, one complete skill adapter is:
-
-```text
-Delta W_s,b = B_b^sh diag(q_s) A_b^sh + B_s,b^priv A_s,b^priv
-```
-
-- The shared factors are block-specific.
-- `q_s` spans the full shared basis and preserves skill identity across blocks.
-- Every populated skill owns block-specific private factors that read the full
-  live state.
-- Procedural SVD proposes and labels skill slots; it does not restrict a
-  skill's input dimensions.
-- `skill_to_experts` supplies the bounded candidate set. Concept evidence may
-  rank that set but does not expand it.
-- LNGram remains confined to definition memory and stays separate from the
-  procedural skill/expert graph.
-
-The current development tree contains 176 tests covering the broader runtime,
-composed LoRA, provenance, transition capture, definition-bank attachment, and
-expert-routing contracts.
+The raw LNGram address and dictionary row IDs occupy separate namespaces. JTD
+owns continuous alignment; LNGram owns sparse selection; HarMax owns continuous
+movement after gather.
 
 ## Runtime and checkpoint contract
 
@@ -210,13 +242,13 @@ expert-routing contracts.
 |---|---|
 | Offline donor construction | Qwen phrase passes, definition readouts, token seeds, and donor assets may use GPU |
 | Production inference | CPU/ARM-resident sparse lookup, JTD, LNGram, HarMax, LoRAs, experts, recurrent blocks, and decoding |
-| Task execution | Core, shared basis, skill/private factors, routers, and experts remain frozen |
+| Task execution | Core, shared basis, skill/private factors, routers, and experts stay frozen |
 | Verified learning | Fit a private update in an offline working buffer, then require replay, regression, version, and provenance checks |
 | Canonical checkpoint | Save selected Engram/LoRA/router/expert/provenance deltas and reference immutable assets by manifest and hash |
 
-The canonical checkpoint is an asset-referenced delta/registry commit rather
-than a repeated full-model snapshot. Token embeddings, definition rows, phrase
-banks, and fitted immutable projections remain stored once.
+The canonical checkpoint is an asset-referenced delta/registry commit. Token
+embeddings, definition rows, phrase banks, and fitted immutable projections are
+stored once.
 
 ## Current implementation boundary
 
@@ -227,17 +259,13 @@ banks, and fitted immutable projections remain stored once.
 | Definition bank and supplied-sense-row attachment | Reported complete |
 | Two-block HarMax recurrent core and Euclidean vocabulary output | CPU verified |
 | Composed LoRA, expert, transition, and provenance tree | 176 tests reported |
-| LNGram address-to-bounded-sense record population | Next integration under O-019 |
-| Definition-pool target evidence and signed HarMax field | Next integration under O-021 |
+| LNGram address-to-bounded-sense record population | Current integration under O-019 |
+| Definition-pool target evidence and signed HarMax field | Current integration under O-021 |
 | Typed branch executors, language training, and optimized ARM measurements | Experimental and engineering milestones |
 
-`Implemented` records a completed artifact. `CPU verified` records an executed
-reference module. `Reported` preserves evidence supplied by the active build
-or coding-agent worktree until its exact commit and raw output are published.
+`Complete`, `CPU verified`, and `reported` preserve distinct evidence levels.
 
 ## Running the reference checks
-
-The repository uses the standard-library test runner:
 
 ```bash
 python -m unittest discover -v
@@ -254,48 +282,53 @@ python stage6_lngram/lngram_smoke.py
 Large donor assets are external and referenced through manifests. The unit
 suite uses synthetic fixtures where those assets are unavailable.
 
-## Source map
+## Code map
 
-- [`DENDRITRON_MASTER_SPEC.md`](DENDRITRON_MASTER_SPEC.md) - authoritative
-  architecture and evidence ledger.
-- [`DENDRITRON_STAGE3_6_RUNBOOK.md`](DENDRITRON_STAGE3_6_RUNBOOK.md) - staged
+- [`DENDRITRON_MASTER_SPEC.md`](DENDRITRON_MASTER_SPEC.md) — architecture and
+  evidence ledger.
+- [`DENDRITRON_STAGE3_6_RUNBOOK.md`](DENDRITRON_STAGE3_6_RUNBOOK.md) — staged
   asset and integration workflow.
-- [`dendritron/model.py`](dendritron/model.py) - model assembly.
-- [`dendritron/recurrent_core.py`](dendritron/recurrent_core.py) - two-block
-  recurrent execution.
-- [`dendritron/memory_fusion.py`](dendritron/memory_fusion.py) - phrase,
-  definition, and miss-path residual fusion.
-- [`dendritron/joint_transfer.py`](dendritron/joint_transfer.py) - JTD maps and
-  joint-to-live movement.
-- [`dendritron/lngram.py`](dendritron/lngram.py) - latent 2/3-gram routing.
-- [`dendritron/geometric_attention.py`](dendritron/geometric_attention.py) -
-  signed HarMax contraction.
+- [`dendritron/model.py`](dendritron/model.py) — model assembly.
+- [`dendritron/recurrent_core.py`](dendritron/recurrent_core.py) — two-block
+  recurrent execution and DeepLoop scaling.
+- [`dendritron/geometric_attention.py`](dendritron/geometric_attention.py) —
+  HarMax mass, harmonic residual, and signed geometric movement.
+- [`dendritron/expert_graph.py`](dendritron/expert_graph.py) — bounded
+  skill-to-expert adjacency and expert junctions.
 - [`dendritron/working_adapter.py`](dendritron/working_adapter.py) and
-  [`dendritron/shared_skill_subspace.py`](dendritron/shared_skill_subspace.py) -
-  composed working LoRAs and procedural-subspace utilities.
-- [`dendritron/expert_graph.py`](dendritron/expert_graph.py) - bounded
-  skill-to-expert adjacency contract.
+  [`dendritron/shared_skill_subspace.py`](dendritron/shared_skill_subspace.py) —
+  composed LoRA skills and procedural-subspace utilities.
+- [`dendritron/retrieval.py`](dendritron/retrieval.py),
+  [`dendritron/jtd.py`](dendritron/jtd.py), and
+  [`dendritron/engram_store.py`](dendritron/engram_store.py) — exact surface
+  lookup and immutable phrase payloads.
+- [`dendritron/joint_transfer.py`](dendritron/joint_transfer.py) and
+  [`dendritron/lngram.py`](dendritron/lngram.py) — continuous alignment and
+  discrete latent addressing.
 
-## Research foundations
+## Research map
 
-Dendritron is an architectural synthesis built on published component work:
+The table distinguishes runtime foundations from supporting design and
+evaluation sources.
 
-1. [Conditional Memory via Scalable Lookup](https://arxiv.org/abs/2601.07372)
-2. [Memory Grafting](https://arxiv.org/abs/2605.20948)
-3. [Lngram: N-gram Conditional Memory in Latent Space](https://arxiv.org/abs/2605.24869)
-4. [Locality Preserving Joint Transfer](https://arxiv.org/abs/1906.07441)
-5. [Shared LoRA Subspaces for Almost Strict Continual Learning](https://arxiv.org/abs/2602.06043)
-6. [DeepLoop: Depth Scaling for Looped Transformers](https://arxiv.org/abs/2607.13491)
-7. [A Collision-Free Hot-Tier Extension for Engram-Style Conditional Memory](https://arxiv.org/abs/2601.16531)
-8. [User as Engram: Internalizing Per-User Memory as Local Parametric Edits](https://arxiv.org/abs/2606.19172)
+| Source | Dendritron use | Class |
+|---|---|---|
+| [Harmonic Loss Trains Interpretable AI Models](https://arxiv.org/abs/2502.01628) | Euclidean HarMax mass, harmonic residual, signed derivative field; finite-center results motivate evaluation | Runtime foundation |
+| [DeepLoop: Depth Scaling for Looped Transformers](https://arxiv.org/abs/2607.13491) | Two tied physical blocks, repeated visits, `kappa_R`, and conservative `p = 1/2` residual scaling | Runtime foundation |
+| [Conditional Memory via Scalable Lookup](https://arxiv.org/abs/2601.07372) | Deterministic conditional memory, canonical token projection, bounded sparse lookup | Runtime foundation |
+| [Memory Grafting](https://arxiv.org/abs/2605.20948) | Offline donor states, exact longest-suffix phrase memory, projection/gating, hash fallback | Runtime foundation |
+| [Lngram: N-gram Conditional Memory in Latent Space](https://arxiv.org/abs/2605.24869) | Hidden-state discretization and exact latent 2/3-gram addressing | Runtime foundation |
+| [Locality Preserving Joint Transfer](https://arxiv.org/abs/1906.07441) | Source-specific maps into a shared locality-preserving frame | Runtime foundation |
+| [Shared LoRA Subspaces for Almost Strict Continual Learning](https://arxiv.org/abs/2602.06043) | Shared procedural factors, lightweight coefficients, private residuals, and consolidation | Runtime foundation |
+| [User as Engram](https://arxiv.org/abs/2606.19172) | Separation of sparse content memory from shared reasoning skill | Design support |
+| [A Collision-Free Hot-Tier Extension for Engram-Style Conditional Memory](https://arxiv.org/abs/2601.16531) | Route-stratified collision and gate-credit diagnostics for surface and Hash-Engram evaluation | Evaluation support |
+| [Bilevel Optimization for Neural Architecture Search](https://arxiv.org/abs/2606.29582) | Offline selection framework for fitter, router, and consolidation hyperparameters | Training support |
+| [Similarity-Guided Curriculum Fine-Tuning of LLMs for Neural Architecture Synthesis](https://arxiv.org/abs/2607.11591) | Similarity-banded offline curricula and interface-preservation checks | Training support |
+| [Learning Faster without Deeper Networks: A*-Inspired Batch Selection](https://arxiv.org/abs/2607.15745) | Priority and reuse-penalty ideas for verified trajectory and replay scheduling | Training support |
+| [Distinct Tasks Engage a Shared Neural Subspace in Human Hippocampus and Anterior Cingulate Cortex](https://doi.org/10.64898/2026.04.24.720703) | Empirical motivation for a stable shared procedural subspace across tasks | Scientific motivation |
+| [A Shared Valence Axis Across Modern LLMs and Human EEG](https://arxiv.org/abs/2606.00129) | Shared-axis and saturation diagnostics for alignment and consolidation studies | Scientific motivation |
+| [From Directions to Cones: Multidimensional Representations of Propositional Facts](https://arxiv.org/abs/2505.21800) | Multidimensional semantic-cone hypotheses, causal probes, and anchor-neighborhood evaluation | Geometry support |
+| [A Geometric Unification of Concept Learning with Concept Cones](https://arxiv.org/abs/2512.07355) | Cone containment and alignment metrics for supervised and discovered semantic directions | Geometry support |
+| [Extinction Depth and q-ary Error-Correcting Codes for the Limited Permutation Channel](https://arxiv.org/abs/2607.19566) | Finite-horizon inspiration for future route-collision certification | Future verification |
 
-## Credits and attribution
-
-- **Ryan Carson:** Dendritron Recurrent Engram architecture synthesis,
-  subsequent extensions, integration contracts, project ledger, and validation
-  coordination represented in this repository.
-- **Initial Dendritron starter and ARM package:** pre-existing foundations;
-  they were not authored by Ryan Carson and are excluded from the attribution
-  above.
-- **Research components:** credited to the authors of the cited papers. Their
-  inclusion as architectural foundations does not transfer authorship.
+Architecture synthesis and integration: Ryan Carson.
