@@ -2,12 +2,12 @@
 
 <p align="center">
   <a href="docs/Dendritron_ARM_Technical_Architecture_Brief.pdf">
-    <img src="docs/Dendritron_ARM_Technical_Architecture_Brief_Cover.png" alt="Dendritron Recurrent Engram technical architecture brief, Revision 4.1" width="620">
+    <img src="docs/Dendritron_ARM_Technical_Architecture_Brief_Cover.png" alt="Dendritron Recurrent Engram technical architecture brief, Revision 4.2" width="620">
   </a>
 </p>
 
 <p align="center">
-  <strong><a href="docs/Dendritron_ARM_Technical_Architecture_Brief.pdf">Read the Revision 4.1 technical architecture brief</a></strong><br>
+  <strong><a href="docs/Dendritron_ARM_Technical_Architecture_Brief.pdf">Read the Revision 4.2 technical architecture brief</a></strong><br>
   Two frozen phrase tables · layer-2 definition geometry · HarMax reasoning · shared LoRA skills · expert-owned branches · two-block DeepLoop
 </p>
 
@@ -102,7 +102,11 @@ surface phrase first:
 4. On a miss, build the exact two-word suffix.
 5. Query the bigram index.
 6. On a hit, receive (bank="bigrams", row_index=j).
-7. On an exact phrase miss, activate the trainable Hash-Engram path.
+7. Independently emit every constituent word's dictionary sense-row handles.
+8. On a two-word miss, use all one-word dictionary senses as the primary
+   frozen semantic result.
+9. Activate the trainable Hash-Engram path for local pattern coverage on an
+   exact phrase miss.
 ```
 
 The returned row pointer then pulls both frozen vectors:
@@ -122,12 +126,17 @@ reuses the donor states directly.
 ```mermaid
 flowchart TD
     A[Complete-word endpoint] --> B{Exact 3-word suffix?}
+    A --> H[Emit every constituent dictionary sense]
     B -->|hit| C[Trigram table row]
     B -->|miss| D{Exact 2-word suffix?}
     D -->|hit| E[Bigram table row]
-    D -->|miss| F[Trainable Hash-Engram]
+    D -->|miss| F[All one-word dictionary senses]
+    D -->|miss coverage| I[Trainable Hash-Engram]
     C --> G[Pull layer 8 and layer 24 vectors]
     E --> G
+    H --> J[Definition-word graph expansion]
+    F --> J
+    J --> K[Layer-2 HarMax candidate pool]
 ```
 
 Example: when the current text ends in `Alexander the Great`, an exact
@@ -174,23 +183,72 @@ Relevant files:
 - [`dendritron/engram_store.py`](dendritron/engram_store.py): row-to-shard loading of both vectors.
 - [`dendritron/memory_fusion.py`](dendritron/memory_fusion.py): JTD transfer, gating, and staged injection.
 
-## The separate concept route: LNGram, JTD, and layer-2 definitions
+## The layer-2 dictionary-word route: senses, definitions, LNGram, and JTD
 
 Phrase lookup answers: **Which stored phrase occurred?**
 
 Concept lookup answers: **Which meanings and relations are relevant in the
 current context?**
 
-The definition bank is a third frozen asset, separate from both phrase tables.
-Each dictionary sense owns one Qwen layer-2 vector plus exact source metadata
-and ordered links to the words in its definition.
+The layer-2 dictionary is the semantic foundation used by the recurrent
+reasoner. It is a third frozen asset alongside the two phrase tables. Each
+dictionary sense owns one Qwen layer-2 vector, its exact definition, source
+metadata, and an ordered list of the dictionary words that construct that
+definition. The phrase and dictionary routes converge in the same HarMax
+candidate pool during every recurrent visit.
 
 | Definition field | Function |
 |---|---|
 | `layer02[2048]` | Fixed concept location |
 | word ID and sense ID | Lookup and trace pointers |
 | exact definition | Source record |
-| ordered definition-word IDs | Graph links showing how the definition is constructed |
+| ordered `definition_word_ids[]` | Directed, source-grounded graph links showing which words construct the definition and in which order |
+
+### How the layer-2 dictionary words participate
+
+The dictionary words perform active routing and graph expansion rather than
+serving as display metadata:
+
+1. Every complete input word and every decoded reasoning word emits all of its
+   dictionary sense IDs, with source, span, and order provenance attached.
+2. A selected sense row contributes its frozen 2,048D layer-2 anchor and its
+   ordered definition-word links. Those links propose a source-grounded local
+   neighborhood of related and competing sense anchors.
+3. The build stage precomputes a bounded Euclidean adjacency for each concept
+   anchor in the JTD-aligned cone. Runtime unions the definition-word and cone
+   candidates, applies source and causal filters, and deduplicates the rows.
+4. A trigram or bigram hit supplies its layer-8/layer-24 phrase vectors while
+   every constituent word still seeds this layer-2 semantic pool. After both
+   phrase probes miss, all one-word senses become the primary frozen result and
+   the Hash-Engram path adds trainable local-pattern coverage.
+5. A latent recurrent step between decoded surface words receives the same kind
+   of dictionary-sense seed through its populated LNGram address record.
+6. The current live query recomputes Euclidean distance to the gathered anchors.
+   HarMax converts those distances into probability mass; the harmonic
+   derivative pulls toward supported definition evidence and pushes away from
+   contradictory or excess-proximity senses.
+7. The evolved live state and the active definition evidence rank the bounded
+   experts adjacent to the selected skill. Every expert branch records the
+   exact dictionary sense anchors and provenance used by its claim.
+
+This produces a complete symbolic-to-geometric bridge:
+
+```text
+surface or decoded word
+  -> word ID
+  -> all matching dictionary sense-row IDs
+  -> exact definition + ordered definition_word_ids[]
+  -> bounded definition/cone adjacency
+  -> frozen layer02[2048] anchor gather
+  -> live Euclidean distances and HarMax signed movement
+  -> evidence-ranked expert branches
+```
+
+Word, token, sense, and LNGram address IDs provide the discrete lookup and
+audit layer. The frozen layer-2 vectors provide the continuous semantic
+geometry. Polysemy remains sense-specific: each meaning has its own row,
+definition links, provenance, and geometric anchor. This 2,048D semantic space
+also remains distinct from the 16–32-direction procedural LoRA update space.
 
 The live concept resolver is:
 
@@ -203,7 +261,8 @@ evolving hidden state h_t
 
 surface phrase + constituent word senses
   -> exact sense seeds
-  -> bounded related-anchor expansion
+  -> ordered definition-word graph expansion
+  -> bounded JTD-cone adjacency union, filtering, and deduplication
   -> frozen layer-2 definition gather
 
 aligned live query + gathered definition anchors
@@ -222,17 +281,19 @@ repulsion through HarMax.
 
 ```mermaid
 flowchart TD
-    A[Live hidden state] --> B[JTD-aligned query]
-    B --> C[LNGram latent address]
-    C --> D[Bounded sense-row record]
-    D --> E[Frozen definition gather]
+    A[Surface words or live hidden state] --> B[Dictionary senses or LNGram address]
+    B --> C[Sense rows plus ordered definition-word graph]
+    C --> D[Bounded gather, filter, and deduplicate]
+    D --> E[Frozen layer-2 anchors]
     E --> F[HarMax signed field]
-    F --> G[Movement into live state]
+    F --> G[Live-state and expert-branch evidence]
 ```
 
-Words, token IDs, sense IDs, and definition-word IDs remain outside the vector
-coordinates. They locate and explain the retrieved points; the points form the
-learned concept geometry.
+The definition bank is built from the curated Open English WordNet, Wiktionary,
+and MeSH sense inventories named in the Stage 4 specification. Its word and
+sense identifiers locate exact rows; its ordered definition-word graph supplies
+source-grounded candidate adjacency; its frozen layer-2 anchors carry the
+geometry used by the active field.
 
 Research basis: [Lngram](https://arxiv.org/abs/2605.24869) supplies hidden-state
 discretization and exact latent n-gram lookup. [Locality Preserving Joint
@@ -403,7 +464,8 @@ flowchart TD
 
 An expert junction binds knowledge, task, skill, branch, prior, and success
 statistics. Each branch specification carries its operator, relation, semantic
-roles, skill mask, evidence signs, and exact anchor IDs.
+roles, skill mask, evidence signs, exact dictionary sense-anchor IDs,
+definition-word provenance, and any supporting phrase-memory rows.
 
 | Branch | Core operation |
 |---|---|
@@ -468,15 +530,16 @@ Every visit binds memory and reasoning into one system:
 ```text
 h_t
   -> JTD-aligned live query u_t
-  -> surface phrase lookup + constituent sense seeds
-  -> LNGram bounded definition address
-  -> frozen phrase and definition gather
+  -> longest surface phrase lookup + every constituent dictionary sense
+  -> ordered definition-word graph + bounded cone adjacency
+  -> LNGram sense seeds during latent steps between decoded words
+  -> filter, deduplicate, and gather frozen phrase and layer-2 anchors
   -> Euclidean distances D_q
   -> HarMax mass p_q and target evidence y_q
   -> signed movement Delta u
-  -> Block 1 expansion or Block 2 contraction
   -> composed shared/private skill LoRA
-  -> bounded expert branches and expert soma
+  -> definition-conditioned bounded experts and typed branches
+  -> Block 1 expansion or Block 2 contraction and expert soma
   -> h_t for the next recurrent visit
 ```
 
@@ -554,6 +617,9 @@ dtype, row count, and SHA-256 manifest.
 | [`dendritron/jtd.py`](dendritron/jtd.py) | Collision-safe surface index |
 | [`dendritron/joint_transfer.py`](dendritron/joint_transfer.py) | Layer-2 joint concept frame and joint-to-live movement |
 | [`dendritron/lngram.py`](dendritron/lngram.py) | Hidden-state discretization and latent n-gram lookup |
+| [`dendritron/lngram_address.py`](dendritron/lngram_address.py) | Populated LNGram address records with sense handles and provenance |
+| [`dendritron/definition_bank.py`](dendritron/definition_bank.py) | One-row-per-sense schema and ordered definition-word graph |
+| [`dendritron/definition_store.py`](dendritron/definition_store.py) | Sparse gather of frozen layer-2 sense anchors |
 | [`dendritron/memory_fusion.py`](dendritron/memory_fusion.py) | Staged donor-vector and definition injection |
 | [`dendritron/geometric_attention.py`](dendritron/geometric_attention.py) | HarMax mass, harmonic residual, and signed Euclidean movement |
 | [`dendritron/recurrent_core.py`](dendritron/recurrent_core.py) | Two physical blocks, repeated rounds, and DeepLoop scaling |
